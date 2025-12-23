@@ -4,10 +4,11 @@ use std::{
 };
 
 use camino::Utf8Path;
-use color_eyre::eyre::{Result, bail};
+use color_eyre::eyre::Result;
 use winget_types::{
     installer::Installer,
     locale::{Copyright, PackageName, Publisher},
+    utils::ValidFileExtensions,
 };
 
 use super::extensions::FileExtension;
@@ -15,6 +16,7 @@ use super::{
     PeInfo,
     extensions::{APPX, APPX_BUNDLE, EXE, MSI, MSIX, MSIX_BUNDLE, ZIP},
 };
+use super::PeInfo;
 use crate::analysis::{
     Installers,
     installers::{
@@ -50,6 +52,17 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                 MsixBundle::new(reader)?.installers()
             }
             FileExtension::Zip => {
+        let extension = ValidFileExtensions::from_path(Utf8Path::new(file_name))?;
+
+        let installers = match extension {
+            ValidFileExtensions::Msi => Msi::new(reader)?.installers(),
+            ValidFileExtensions::Msix | ValidFileExtensions::Appx => {
+                Msix::new(reader)?.installers()
+            }
+            ValidFileExtensions::MsixBundle | ValidFileExtensions::AppxBundle => {
+                MsixBundle::new(reader)?.installers()
+            }
+            ValidFileExtensions::Zip => {
                 let mut scoped_zip = Zip::new(reader)?;
                 let installers = mem::take(&mut scoped_zip.installers);
                 return Ok(Self {
@@ -59,6 +72,7 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                 });
             }
             FileExtension::Exe => {
+            ValidFileExtensions::Exe => {
                 let mut exe = Exe::new(reader)?;
                 return Ok(Self {
                     installers: exe.installers(),
@@ -85,6 +99,7 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                 // are converted to an MSIX or MSIXBundle before downloading
                 bail!(".appinstaller files are not supported for the analyze command")
             }
+            _ => unreachable!(),
         };
         Ok(Self {
             installers,
