@@ -4,7 +4,13 @@ pub mod graphql;
 mod rest;
 pub mod utils;
 
-use const_format::formatcp;
+use std::{
+    env,
+    fmt::{self, Display, Formatter},
+    ops::Deref,
+    sync::OnceLock,
+};
+
 pub use error::GitHubError;
 
 pub struct EnvStr {
