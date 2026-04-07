@@ -1,0 +1,12 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-slim
+    steps:
+      - run: echo 'This is not meant to be run.'
