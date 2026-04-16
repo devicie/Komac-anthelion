@@ -148,6 +148,7 @@ crate-type = ["cdylib"]
 
 [patch.crates-io]
 winget-types = { git = "https://github.com/UnownPlain/winget-types.git", branch = "anthelion" }
+serde-saphyr = { git = "https://github.com/UnownPlain/serde-saphyr.git", branch = "anthelion" }
 # Anthelion End
 
 [dev-dependencies]
