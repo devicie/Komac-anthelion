@@ -222,6 +222,7 @@ impl Msi {
             .parse::<LanguageTag>()
             .ok()
             .filter(|language_tag| language_tag != &langid!("und"))
+            .filter(|language_tag| language_tag != &LanguageTag::new(langid!("und")))
     }
 
     fn wix_ui_install_dir(&self) -> Option<&str> {
