@@ -208,6 +208,33 @@ impl Downloader {
         let last_modified = download.last_modified();
 
         let progress_bar = match download.content_length() {
+        download.upgrade_to_https(client).await;
+
+        let res = client.get((***download.url()).clone()).send().await?;
+
+        if let Err(err) = res.error_for_status_ref() {
+            bail!(
+                "{} returned {}",
+                err.url().unwrap().as_str(),
+                err.status().unwrap()
+            );
+        }
+
+        // Check that we're downloading an application
+        Self::check_content_types(&download, res.headers().get_all(CONTENT_TYPE))?;
+
+        let file_name = download
+            .file_name(res.url(), res.headers().get(CONTENT_DISPOSITION))
+            .into_owned();
+
+        let last_modified = res
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|last_modified| last_modified.to_str().ok())
+            .and_then(|last_modified| DateTime::parse_from_rfc2822(last_modified).ok())
+            .map(|date_time| date_time.date_naive());
+
+        let progress_bar = match res.content_length() {
             Some(len) => ProgressBar::new(len).with_style(
                 ProgressStyle::with_template(Self::PROGRESS_TEMPLATE)?
                     .progress_chars(Self::PROGRESS_CHARS),
