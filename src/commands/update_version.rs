@@ -344,7 +344,7 @@ impl UpdateVersion {
         {
             bail!(
                 "Replacement version {version} does not exist in {WINGET_PKGS_FULL_NAME}. The closest version is {closest}"
-            )
+            );
         }
 
         Ok(replace_version)
