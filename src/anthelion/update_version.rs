@@ -211,10 +211,6 @@ pub async fn update_package(
     let (mut manifests, mut github_values, mut download_results) = try_join!(
         github
             .get_manifests(&package_identifier, latest_version, font)
-            .map_err(|e| Error::new(
-                Status::GenericFailure,
-                format!("Failed to get manifests: {e}")
-            .get_manifests(&package_identifier, latest_version, font)
             .map_err(|e| AnthelionError::failure(
                 ErrorCode::UpdateFailed,
                 Report::from(e).wrap_err("Failed to get manifests")
