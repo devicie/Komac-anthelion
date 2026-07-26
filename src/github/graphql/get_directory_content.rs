@@ -8,6 +8,7 @@ use super::{
     super::{GitHubError, MICROSOFT, WINGET_PKGS, client::GitHub, utils::PackagePath},
     GRAPHQL_URL, GetFileContent, github_schema as schema,
 };
+use crate::github::GITHUB_REF;
 
 #[derive(cynic::QueryVariables)]
 pub struct GetDirectoryContentVariables<'a> {
@@ -86,6 +87,7 @@ impl GitHub {
         R: AsRef<str>,
         P: fmt::Display,
     {
+        let expression = format!("{GITHUB_REF}:{path}");
         let GraphQlResponse { data, errors } = self
             .0
             .post(GRAPHQL_URL)
