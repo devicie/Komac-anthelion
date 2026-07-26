@@ -6,6 +6,9 @@ mod pre_download;
 use std::fmt;
 
 use chrono::{DateTime, NaiveDate};
+use camino::Utf8Path;
+use color_eyre::Result;
+use const_format::formatcp;
 pub use downloader::Downloader;
 pub use downloads::Downloads;
 pub use file::DownloadedFile;
@@ -44,6 +47,27 @@ impl Download {
     /// Returns a mutable reference to the download's [`Url`].
     pub fn into_url(self) -> Url {
         self.0
+    }
+
+    fn is_successful(response: &reqwest::Result<Response>) -> bool {
+        response
+            .as_ref()
+            .is_ok_and(|response| response.status().is_success())
+    }
+
+    async fn send(&mut self, client: &Client) -> reqwest::Result<Response> {
+        let url = (**self.0).clone();
+        let response = client.get(url.clone()).send().await;
+
+        if url == *self.0.original_url() || Self::is_successful(&response) {
+            return response;
+        }
+
+        let response = client.get(self.0.original_url().clone()).send().await;
+        if Self::is_successful(&response) {
+            self.0.use_original_url();
+        }
+        response
     }
 
     /// Gets the filename from a URL given the URL, a final redirected URL, and an optional
@@ -127,7 +151,7 @@ impl Download {
         }
     }
 
-    pub async fn convert_to_github_versioned(&mut self) -> reqwest::Result<()> {
+    pub async fn convert_to_github_versioned(&mut self) -> Result<()> {
         const LATEST: &str = "latest";
         const DOWNLOAD: &str = "download";
         const MAX_HOPS: u8 = 2;
@@ -146,11 +170,15 @@ impl Download {
 
                 // If there was a redirect error because max hops were reached, as intended, set the
                 // original vanity URL to the redirected versioned URL
-                if let Err(error) = limited_redirect_client.head(self.as_str()).send().await
+                if let Err(error) = limited_redirect_client
+                    .head(self.0.original_url().clone())
+                    .send()
+                    .await
                     && error.is_redirect()
                     && let Some(final_url) = error.url()
                 {
-                    **self.0 = final_url.clone();
+                    *self.0 = final_url.as_str().parse()?;
+                    *self.0.original_url_mut() = final_url.clone();
                 }
             }
         }
