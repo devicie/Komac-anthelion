@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use camino::Utf8Path;
-use winget_types::installer::{Architecture, Installer, Scope, VALID_FILE_EXTENSIONS};
+use winget_types::{
+    installer::{Architecture, Installer, Scope},
+    utils::ValidFileExtensions,
+};
 
 fn locale_score(previous_installer: &Installer, new_installer: &Installer) -> f64 {
     let Some(previous_locale) = previous_installer.locale.as_ref() else {
@@ -102,14 +104,8 @@ pub fn match_installers(
                     new_installer.url.as_str(),
                 );
 
-                let new_extension = Utf8Path::new(new_installer.url.as_str())
-                    .extension()
-                    .filter(|extension| VALID_FILE_EXTENSIONS.contains(extension))
-                    .unwrap_or_default();
-                let previous_extension = Utf8Path::new(previous_installer.url.as_str())
-                    .extension()
-                    .filter(|extension| VALID_FILE_EXTENSIONS.contains(extension))
-                    .unwrap_or_default();
+                let new_extension = ValidFileExtensions::from_url(&new_installer.url);
+                let previous_extension = ValidFileExtensions::from_url(&previous_installer.url);
                 if new_extension != previous_extension {
                     score = 0.0;
                 }
@@ -134,6 +130,21 @@ pub fn match_installers(
         .collect::<HashMap<_, _>>()
 }
 
+pub fn unmatched_installers(
+    matched_installers: &HashMap<Installer, Installer>,
+    new_installers: &[Installer],
+) -> Vec<Installer> {
+    new_installers
+        .iter()
+        .filter(|new_installer| {
+            !matched_installers
+                .values()
+                .any(|matched_installer| matched_installer == *new_installer)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, str::FromStr};
@@ -144,7 +155,7 @@ mod tests {
         url::DecodedUrl,
     };
 
-    use crate::match_installers::match_installers;
+    use crate::match_installers::{match_installers, unmatched_installers};
 
     #[test]
     fn test_vscodium() {
@@ -197,6 +208,37 @@ mod tests {
         assert_eq!(
             match_installers(previous_installers, &new_installers),
             expected
+        );
+    }
+
+    #[test]
+    fn identifies_new_installers_without_a_previous_match() {
+        let previous_x64 = Installer {
+            architecture: Architecture::X64,
+            url: DecodedUrl::from_str("https://example.com/app-1.0-x64.exe").unwrap(),
+            ..Installer::default()
+        };
+        let new_x64 = Installer {
+            architecture: Architecture::X64,
+            url: DecodedUrl::from_str("https://example.com/app-2.0-x64.exe").unwrap(),
+            ..Installer::default()
+        };
+        let new_arm64 = Installer {
+            architecture: Architecture::Arm64,
+            url: DecodedUrl::from_str("https://example.com/app-2.0-arm64.exe").unwrap(),
+            ..Installer::default()
+        };
+        let new_installers = vec![new_x64.clone(), new_arm64.clone()];
+
+        let matched_installers = match_installers(vec![previous_x64], &new_installers);
+
+        assert_eq!(
+            matched_installers.values().collect::<Vec<_>>(),
+            vec![&new_x64]
+        );
+        assert_eq!(
+            unmatched_installers(&matched_installers, &new_installers),
+            vec![new_arm64]
         );
     }
 
