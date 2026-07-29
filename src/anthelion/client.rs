@@ -103,6 +103,7 @@ impl Komac {
             Arc::clone(&self.downloader),
             self.concurrency,
             parse_installer_inputs(vec![request.installer])?,
+            true,
         )
         .await
         .map_err(napi::Error::from)?
@@ -124,6 +125,7 @@ impl Komac {
             Arc::clone(&self.downloader),
             self.concurrency,
             parse_installer_inputs(request.installers)?,
+            true,
         )
         .await
         .map(|analyses| analyses.into_iter().map(AnalyzedArtifact::from).collect())
