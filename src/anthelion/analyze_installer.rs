@@ -16,7 +16,7 @@ use super::types::{
     AnalyzedArtifact, AnalyzedInstaller, AppsAndFeaturesEntry, DetectedVersions, InstallerSource,
 };
 use crate::{
-    analysis::Analyzer,
+    analysis::{Analyzer, installers::font::FontAnalysis},
     download::{DownloadedFile, Downloader},
     manifests::Url,
 };
@@ -28,6 +28,7 @@ pub struct ArtifactAnalysis {
     pub release_date: Option<chrono::NaiveDate>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    pub font_version: Option<String>,
     pub installers: Vec<Installer>,
     pub possible_installer_files: Vec<Utf8PathBuf>,
 }
@@ -89,6 +90,7 @@ pub(super) async fn analyze_sources(
     downloader: Arc<Downloader>,
     concurrency: NonZeroUsize,
     sources: Vec<ParsedInstallerSource>,
+    font_version: bool,
 ) -> AnthelionResult<Vec<ArtifactAnalysis>> {
     let parsed_sources = sources
         .into_iter()
@@ -131,7 +133,8 @@ pub(super) async fn analyze_sources(
                     ))
                 })?;
                 let (source_key, analysis) = tokio::task::spawn_blocking(move || {
-                    let analysis = analyze_download(file, &source_key.nested_installer_matches)?;
+                    let analysis =
+                        analyze_download(file, &source_key.nested_installer_matches, font_version)?;
                     Ok::<_, AnthelionError>((source_key, analysis))
                 })
                 .await
@@ -185,8 +188,18 @@ struct AnalysisKey {
 fn analyze_download(
     mut file: DownloadedFile,
     nested_installer_matches: &[String],
+    font_version: bool,
 ) -> AnthelionResult<ArtifactAnalysis> {
-    let mut analyzer = Analyzer::new(&mut file.file, &file.file_name).map_err(|error| {
+    let mut analyzer = Analyzer::new(
+        &mut file.file,
+        &file.file_name,
+        if font_version {
+            FontAnalysis::Version
+        } else {
+            FontAnalysis::None
+        },
+    )
+    .map_err(|error| {
         AnthelionError::failure(error.wrap_err(format!("Failed to analyze {}", file.file_name)))
     })?;
 
@@ -214,6 +227,12 @@ fn analyze_download(
                 .filter_map(|analysis| analysis.product_version.take()),
         )
         .or(analyzer.product_version);
+        analyzer.font_version = first_non_empty(
+            matched
+                .iter_mut()
+                .filter_map(|analysis| analysis.font_version.take()),
+        )
+        .or(analyzer.font_version);
         analyzer.installers = matched
             .into_iter()
             .map(|analysis| analysis.installer)
@@ -245,6 +264,7 @@ fn analyze_download(
         release_date: file.last_modified,
         file_version: analyzer.file_version,
         product_version: analyzer.product_version,
+        font_version: analyzer.font_version,
         installers: analyzer.installers,
         possible_installer_files,
     })
@@ -272,6 +292,7 @@ impl From<ArtifactAnalysis> for AnalyzedArtifact {
             versions: DetectedVersions {
                 file: analysis.file_version,
                 product: analysis.product_version,
+                font: analysis.font_version,
             },
             installers: analysis
                 .installers
