@@ -9,7 +9,10 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use tracing::debug;
 use winget_types::{installer::Architecture, url::DecodedUrl};
 
-use crate::{analysis::Analyzer, download::DownloadedFile};
+use crate::{
+    analysis::{Analyzer, installers::font::FontAnalysis},
+    download::DownloadedFile,
+};
 
 pub async fn process_files(
     files: &mut [DownloadedFile],
@@ -23,7 +26,7 @@ pub async fn process_files(
              last_modified,
              ..
          }| async move {
-            let mut file_analyzer = Analyzer::new(file, file_name)?;
+            let mut file_analyzer = Analyzer::new(file, file_name, FontAnalysis::None)?;
             let architecture = url
                 .override_architecture()
                 .or_else(|| Architecture::from_url(url.as_str()));

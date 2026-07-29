@@ -48,7 +48,7 @@ pub struct AnalyzedArtifact {
     pub sha256: String,
     /// HTTP last-modified date, when supplied by the server.
     pub release_date: Option<String>,
-    /// File version metadata detected in the artifact.
+    /// Version metadata detected in the artifact.
     pub versions: DetectedVersions,
     /// Installers represented by this artifact, including selected nested installers.
     pub installers: Vec<AnalyzedInstaller>,
@@ -61,6 +61,8 @@ pub struct DetectedVersions {
     pub file: Option<String>,
     /// PE `ProductVersion`, if present.
     pub product: Option<String>,
+    /// OpenType name ID 5, normalized for package-version use, if present.
+    pub font: Option<String>,
 }
 
 /// Installer information detected during analysis.
@@ -129,7 +131,7 @@ pub struct UpdatePackageRequest {
     /// Package identifier, for example `Microsoft.VisualStudioCode`.
     pub package_identifier: String,
     /// How to determine the new package version.
-    #[napi(ts_type = "string | { source: 'display' | 'product' | 'file' }")]
+    #[napi(ts_type = "string | { source: 'display' | 'product' | 'file' | 'fontVersion' }")]
     pub version: Either<String, VersionSelection>,
     /// New installer artifacts.
     pub installers: Vec<Either<String, InstallerSource>>,
@@ -149,7 +151,7 @@ pub struct UpdatePackageRequest {
 /// Installer-derived package version selection.
 #[napi(object)]
 pub struct VersionSelection {
-    #[napi(ts_type = "'display' | 'product' | 'file'")]
+    #[napi(ts_type = "'display' | 'product' | 'file' | 'fontVersion'")]
     pub source: String,
 }
 
