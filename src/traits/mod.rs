@@ -1,10 +1,12 @@
 mod ascii_ext;
+#[cfg(feature = "cli")]
 pub mod name;
 pub mod path;
 use std::{cell::Cell, mem, sync::LazyLock};
 
 pub use ascii_ext::AsciiExt;
 use html2text::render::{TaggedLine, TextDecorator};
+#[cfg(feature = "cli")]
 pub use name::Name;
 use regex::Regex;
 use winget_types::{

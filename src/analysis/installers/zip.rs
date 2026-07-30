@@ -1,22 +1,26 @@
+#[cfg(feature = "cli")]
+use std::mem;
 use std::{
     collections::{BTreeSet, HashMap},
     io,
     io::{Read, Seek, SeekFrom},
-    mem,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
 use color_eyre::eyre::Result;
+#[cfg(feature = "cli")]
 use inquire::{CustomType, MultiSelect, min_length};
 use regex::Regex;
 use tracing::debug;
-use winget_types::installer::{
-    Installer, InstallerType, NestedInstallerFiles, PortableCommandAlias,
-};
+#[cfg(feature = "cli")]
+use winget_types::installer::PortableCommandAlias;
+use winget_types::installer::{Installer, InstallerType, NestedInstallerFiles};
 use zip::ZipArchive;
 
 use super::super::Analyzer;
-use crate::{prompts::handle_inquire_error, traits::path::LowercaseExtension};
+#[cfg(feature = "cli")]
+use crate::prompts::handle_inquire_error;
+use crate::traits::path::LowercaseExtension;
 
 const VALID_NESTED_FILE_EXTENSIONS: [&str; 6] =
     ["msix", "msi", "appx", "exe", "msixbundle", "appxbundle"];
@@ -202,6 +206,7 @@ impl<R: Read + Seek> Zip<R> {
         })
     }
 
+    #[cfg(feature = "cli")]
     pub fn prompt(&mut self) -> Result<()> {
         if !&self.possible_installer_files.is_empty() {
             let chosen = MultiSelect::new(

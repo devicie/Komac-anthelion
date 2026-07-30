@@ -2254,6 +2254,7 @@ dependencies = [
  "nt-time 0.15.0",
  "num_cpus",
  "open",
+ "openssl",
  "ordinal",
  "owo-colors",
  "percent-encoding",

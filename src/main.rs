@@ -31,6 +31,7 @@ mod download;
 mod download_file;
 mod editor;
 mod github;
+mod http_headers;
 mod manifests;
 mod match_installers;
 mod prompts;
