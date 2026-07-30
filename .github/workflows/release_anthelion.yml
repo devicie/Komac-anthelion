@@ -200,6 +200,10 @@ jobs:
 
     env:
       RUST_TARGET: ${{ matrix.platform.target }}
+      AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR: /tmp/openssl-include
+      AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
+      X86_64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR: /tmp/openssl-include
+      X86_64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR: /usr/lib/x86_64-linux-gnu
 
     steps:
       - name: Checkout
@@ -240,6 +244,34 @@ jobs:
 
           - name: Setup Bun
             uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+          - name: Install OpenSSL
+            if: ${{ contains(matrix.platform.target, 'linux-gnu') }}
+            run: |
+              if [[ "${RUST_TARGET}" == x86_64-* ]]; then
+                source /etc/os-release
+                sudo dpkg --add-architecture amd64
+                grep -q '^Architectures:' /etc/apt/sources.list.d/ubuntu.sources \
+                  || sudo sed -i '/^Types: deb$/a Architectures: arm64' /etc/apt/sources.list.d/ubuntu.sources
+                {
+                  printf 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu %s main\n' \
+                    "${VERSION_CODENAME}" "${VERSION_CODENAME}-updates"
+                  printf 'deb [arch=amd64] http://security.ubuntu.com/ubuntu %s main\n' \
+                    "${VERSION_CODENAME}-security"
+                } | sudo tee /etc/apt/sources.list.d/ubuntu-amd64.list > /dev/null
+                openssl_arch=amd64
+                openssl_multiarch=x86_64-linux-gnu
+              else
+                openssl_arch=arm64
+                openssl_multiarch=aarch64-linux-gnu
+              fi
+
+              sudo apt-get update
+              sudo apt-get install --yes "libssl-dev:${openssl_arch}"
+              mkdir -p /tmp/openssl-include
+              cp --recursive /usr/include/openssl /tmp/openssl-include/
+              cp "/usr/include/${openssl_multiarch}/openssl/"* \
+                /tmp/openssl-include/openssl/
 
       - name: Install Dependencies
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}

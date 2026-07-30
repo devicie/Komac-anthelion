@@ -19,8 +19,9 @@ use winget_types::{
 use crate::{
     commands::utils::{RateLimit, SPINNER_SLOW_TICK_RATE},
     github::client::GitHub,
+    http_headers::default_headers,
     prompts::text::confirm_prompt,
-    token::{TokenManager, default_headers},
+    token::TokenManager,
 };
 
 const RESOURCE_MISSING_STATUS_CODES: [StatusCode; 2] = [StatusCode::NOT_FOUND, StatusCode::GONE];
