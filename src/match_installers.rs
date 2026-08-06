@@ -114,10 +114,21 @@ pub fn match_installers(
                     duplicate_elevation_scope(&previous_installer, previous_installers);
             }
 
+            // Nested installer metadata can change when an archive moves between one and multiple
+            // executable candidates, so prefer an available architecture match before scoring.
+            let has_matching_architecture = new_installers
+                .iter()
+                .any(|new_installer| new_installer.architecture == previous_installer.architecture);
             let mut max_score = 0.0;
             let mut best_match = None;
 
             for new_installer in new_installers {
+                if has_matching_architecture
+                    && new_installer.architecture != previous_installer.architecture
+                {
+                    continue;
+                }
+
                 let installer_url = &new_installer.url;
                 let mut score = 0.0;
                 if new_installer.architecture == previous_installer.architecture {
@@ -205,7 +216,10 @@ mod tests {
 
     use rstest::rstest;
     use winget_types::{
-        installer::{Architecture, ElevationRequirement, Installer, Scope},
+        installer::{
+            Architecture, ElevationRequirement, Installer, InstallerType, NestedInstallerType,
+            Scope,
+        },
         url::DecodedUrl,
     };
 
@@ -322,6 +336,47 @@ mod tests {
         let matched = HashMap::from([(Installer::default(), regular)]);
 
         assert!(unmatched_installers(&matched, &[bold]).is_empty());
+    }
+
+    #[test]
+    fn prefers_matching_architecture_over_nested_installer_type() {
+        let previous_x64 = Installer {
+            architecture: Architecture::X64,
+            r#type: Some(InstallerType::Zip),
+            nested_installer_type: Some(NestedInstallerType::Portable),
+            url: DecodedUrl::from_str(
+                "https://example.com/coreutils-0.9.0-x86_64-pc-windows-msvc.zip",
+            )
+            .unwrap(),
+            ..Installer::default()
+        };
+        let new_x86 = Installer {
+            architecture: Architecture::X86,
+            r#type: Some(InstallerType::Zip),
+            nested_installer_type: Some(NestedInstallerType::Portable),
+            url: DecodedUrl::from_str(
+                "https://example.com/coreutils-0.10.0-i686-pc-windows-msvc.zip",
+            )
+            .unwrap(),
+            ..Installer::default()
+        };
+        let new_x64 = Installer {
+            architecture: Architecture::X64,
+            r#type: Some(InstallerType::Zip),
+            url: DecodedUrl::from_str(
+                "https://example.com/coreutils-0.10.0-x86_64-pc-windows-msvc.zip",
+            )
+            .unwrap(),
+            ..Installer::default()
+        };
+
+        assert_eq!(
+            match_installers(
+                std::slice::from_ref(&previous_x64),
+                &[new_x86, new_x64.clone()],
+            ),
+            HashMap::from([(previous_x64, new_x64)])
+        );
     }
 
     #[rstest]
