@@ -9,6 +9,7 @@ use clap::Parser;
 use color_eyre::eyre::{Error, Result, bail};
 use futures_util::TryFutureExt;
 use indicatif::ProgressBar;
+use itertools::Itertools;
 use owo_colors::OwoColorize;
 use secrecy::SecretString;
 use tokio::try_join;
@@ -139,6 +140,25 @@ impl UpdateVersion {
             .flat_map(Analyzer::into_installers)
             .collect();
         manifests.installer.optimize();
+
+        manifests.installer.locale = None;
+        manifests
+            .installer
+            .installers
+            .iter()
+            .flat_map(|installer| &installer.locale)
+            .all_equal()
+            .then(|| &mut manifests.installer.installers)
+            .into_iter()
+            .flatten()
+            .for_each(|installer| installer.locale = None);
+
+        manifests
+            .installer
+            .installers
+            .iter_mut()
+            .flat_map(|installer| &mut installer.apps_and_features_entries)
+            .for_each(|entry| entry.deduplicate(&manifests.default_locale));
 
         manifests.update(
             &self.version,

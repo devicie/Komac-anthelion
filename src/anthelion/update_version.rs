@@ -350,6 +350,25 @@ pub async fn update_package(
     manifests.installer.installers = installers;
     manifests.installer.optimize();
 
+    manifests.installer.locale = None;
+    manifests
+        .installer
+        .installers
+        .iter()
+        .flat_map(|installer| &installer.locale)
+        .all_equal()
+        .then(|| &mut manifests.installer.installers)
+        .into_iter()
+        .flatten()
+        .for_each(|installer| installer.locale = None);
+
+    manifests
+        .installer
+        .installers
+        .iter_mut()
+        .flat_map(|installer| &mut installer.apps_and_features_entries)
+        .for_each(|entry| entry.deduplicate(&manifests.default_locale));
+
     manifests.update(&package_version, &mut github_values, None);
 
     if let Some(release_notes_url) = release_notes_url {
