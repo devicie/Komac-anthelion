@@ -11,6 +11,7 @@ use clap::Parser;
 use color_eyre::eyre::{Result, bail, eyre};
 use indicatif::ProgressBar;
 use inquire::CustomType;
+use itertools::Itertools;
 use ordinal::Ordinal;
 use owo_colors::OwoColorize;
 use secrecy::SecretString;
@@ -446,6 +447,17 @@ impl NewVersion {
             .for_each(|entry| entry.deduplicate(&default_locale_manifest));
 
         installer_manifest.optimize();
+
+        installer_manifest.locale = None;
+        installer_manifest
+            .installers
+            .iter()
+            .flat_map(|installer| &installer.locale)
+            .all_equal()
+            .then(|| &mut installer_manifest.installers)
+            .into_iter()
+            .flatten()
+            .for_each(|installer| installer.locale = None);
 
         let manifests = Manifests {
             installer: installer_manifest,
