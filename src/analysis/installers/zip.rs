@@ -18,7 +18,10 @@ use winget_types::installer::PortableCommandAlias;
 use winget_types::installer::{Installer, InstallerType, NestedInstallerFiles};
 use zip::ZipArchive;
 
-use super::{super::Analyzer, font::FontAnalysis};
+use super::{
+    super::{Analyzer, SiblingFiles},
+    font::FontAnalysis,
+};
 use crate::analysis::extensions::FileExtension;
 #[cfg(feature = "cli")]
 use crate::prompts::handle_inquire_error;
@@ -323,18 +326,22 @@ impl<R: Read + Seek> Zip<R> {
             .iter()
             .filter(|path| matches(path))
             .map(|path| {
+                let siblings = read_sibling_files(&mut self.archive, path)?;
                 let mut nested_file = self.archive.by_name(path.as_str())?;
                 let mut temp_file = tempfile::tempfile()?;
                 io::copy(&mut nested_file, &mut temp_file)?;
                 temp_file.seek(SeekFrom::Start(0))?;
 
-                let nested_analyzer =
-                    Analyzer::new(&mut temp_file, path.as_str(), self.font_analysis).map_err(
-                        |source| InvalidNestedInstallerError {
-                            path: path.clone(),
-                            source: source.into(),
-                        },
-                    )?;
+                let nested_analyzer = Analyzer::with_sibling_files(
+                    &mut temp_file,
+                    path.as_str(),
+                    self.font_analysis,
+                    &siblings,
+                )
+                .map_err(|source| InvalidNestedInstallerError {
+                    path: path.clone(),
+                    source: source.into(),
+                })?;
                 let nested_installer_files = BTreeSet::from([NestedInstallerFiles {
                     relative_file_path: path.as_str().into(),
                     portable_command_alias: None,
@@ -374,19 +381,54 @@ impl<R: Read + Seek> Zip<R> {
         path: &Utf8Path,
         font_analysis: FontAnalysis,
     ) -> Result<Vec<Installer>> {
+        let siblings = read_sibling_files(archive, path)?;
         let mut chosen_file = archive.by_name(path.as_str())?;
         let mut temp_file = tempfile::tempfile()?;
         io::copy(&mut chosen_file, &mut temp_file)?;
         temp_file.seek(SeekFrom::Start(0))?;
         let analyzer =
-            Analyzer::new(&mut temp_file, path.as_str(), font_analysis).map_err(|source| {
-                InvalidNestedInstallerError {
-                    path: path.to_owned(),
-                    source: source.into(),
-                }
+            Analyzer::with_sibling_files(&mut temp_file, path.as_str(), font_analysis, &siblings)
+                .map_err(|source| InvalidNestedInstallerError {
+                path: path.to_owned(),
+                source: source.into(),
             })?;
         Ok(analyzer.installers)
     }
+}
+
+/// Splits a ZIP entry's path into its folder and file name, accepting either path separator.
+fn split_entry_path(path: &str) -> (&str, &str) {
+    path.rsplit_once(['/', '\\']).unwrap_or(("", path))
+}
+
+/// Reads the small settings files that are in the same folder as the nested installer at `path`,
+/// such as the `setup.ini` that an InstallShield setup launcher reads from beside itself.
+fn read_sibling_files<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    path: &Utf8Path,
+) -> Result<SiblingFiles> {
+    let (folder, _) = split_entry_path(path.as_str());
+    let sibling_names = archive
+        .file_names()
+        .flatten()
+        .filter(|name| {
+            let (sibling_folder, sibling_name) = split_entry_path(name);
+            sibling_folder.eq_ignore_ascii_case(folder) && SiblingFiles::is_wanted(sibling_name)
+        })
+        .map(|name| name.into_owned())
+        .collect::<Vec<_>>();
+
+    let mut siblings = SiblingFiles::default();
+    for name in sibling_names {
+        let file = archive.by_name(&name)?;
+        if file.size() > SiblingFiles::MAX_SIZE {
+            continue;
+        }
+        let mut data = Vec::new();
+        file.take(SiblingFiles::MAX_SIZE).read_to_end(&mut data)?;
+        siblings.push(split_entry_path(&name).1.to_owned(), data);
+    }
+    Ok(siblings)
 }
 
 #[cfg(test)]
@@ -725,5 +767,49 @@ mod tests {
         assert_eq!(analyses.len(), 1);
         assert_eq!(analyses[0].font_version.as_deref(), Some("4.2"));
         Ok(())
+    }
+
+    #[test]
+    fn reads_settings_files_from_beside_nested_installer() -> Result<()> {
+        let bytes = zip_with_files(&[
+            ("App/Setup.exe", b"MZ"),
+            ("App/Setup.ini", b"[Startup]"),
+            ("App/setup.iss", b"[Application]"),
+            ("App/data1.cab", b"MSCF"),
+            ("App/Sub/setup.ini", b"nested"),
+            ("Other/setup.iss", b"other"),
+        ])?;
+        let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+
+        let siblings = read_sibling_files(&mut archive, Utf8Path::new("App/Setup.exe"))?;
+
+        assert_eq!(siblings.get("setup.ini"), Some(b"[Startup]".as_slice()));
+        assert_eq!(siblings.get("setup.iss"), Some(b"[Application]".as_slice()));
+        assert_eq!(siblings.get("data1.cab"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_settings_files_from_beside_root_installer() -> Result<()> {
+        let bytes = zip_with_files(&[
+            ("setup.exe", b"MZ"),
+            ("setup.ini", b"[Startup]"),
+            ("App/setup.iss", b"nested"),
+        ])?;
+        let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+
+        let siblings = read_sibling_files(&mut archive, Utf8Path::new("setup.exe"))?;
+
+        assert_eq!(siblings.get("setup.ini"), Some(b"[Startup]".as_slice()));
+        assert_eq!(siblings.get("setup.iss"), None);
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case("App/setup.ini", ("App", "setup.ini"))]
+    #[case(r"App\Sub\setup.ini", (r"App\Sub", "setup.ini"))]
+    #[case("setup.ini", ("", "setup.ini"))]
+    fn splits_entry_path(#[case] path: &str, #[case] expected: (&str, &str)) {
+        assert_eq!(split_entry_path(path), expected);
     }
 }
