@@ -1,6 +1,6 @@
 mod downloader;
 mod downloads;
-mod file;
+pub(crate) mod file;
 
 use std::{borrow::Cow, fmt};
 

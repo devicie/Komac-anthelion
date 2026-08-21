@@ -17,7 +17,6 @@ pub struct Downloads(Vec<DownloadedFile>);
 
 impl Downloads {
     /// Creates a new [`Downloads`] from an iterator of [`DownloadedFile`].
-    #[expect(unused)]
     pub fn new<I>(downloads: I) -> Self
     where
         I: IntoIterator<Item = DownloadedFile>,
