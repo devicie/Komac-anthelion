@@ -20,7 +20,7 @@ use winget_types::{
     },
 };
 
-use crate::{prompts::handle_inquire_error, traits::Name};
+use crate::{environment::CI, prompts::handle_inquire_error, traits::Name};
 
 pub trait TextPrompt: Name {
     const HELP_MESSAGE: Option<&'static str> = None;
@@ -132,6 +132,9 @@ where
 {
     if let Some(value) = parameter {
         Ok(Some(value))
+    } else if *CI {
+        // Prompts can't be answered in CI, so fall back to the default, if there is a valid one
+        Ok(default.and_then(|default| default.parse::<T>().ok()))
     } else {
         let message = format!("{}:", <T as Name>::NAME);
         let mut prompt = Text::new(&message).with_validator(|input: &str| {
@@ -172,6 +175,17 @@ where
 {
     if let Some(value) = parameter {
         Ok(value)
+    } else if *CI {
+        // Prompts can't be answered in CI, so the default is the only value left to use
+        let default = default.as_ref().map(U::as_ref).ok_or_else(|| {
+            InquireError::from(CustomUserError::from(format!(
+                "{} is required but was not provided and has no default",
+                T::NAME
+            )))
+        })?;
+        default
+            .parse::<T>()
+            .map_err(|err| InquireError::from(CustomUserError::from(err.to_string())))
     } else {
         let mut prompt =
             Text::new(T::NAME).with_validator(|input: &str| match input.parse::<T>() {

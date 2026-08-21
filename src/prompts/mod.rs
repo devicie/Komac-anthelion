@@ -4,7 +4,7 @@ use bitflags::Flags;
 use inquire::{InquireError, MultiSelect, Select, error::InquireResult};
 use winget_types::installer::UpgradeBehavior;
 
-use crate::traits::Name;
+use crate::{environment::CI, traits::Name};
 
 pub mod list;
 pub mod text;
@@ -31,6 +31,10 @@ pub fn radio_prompt<T>() -> InquireResult<T>
 where
     T: Name + AllItems<Item = T> + Display,
 {
+    // Prompts can't be answered in CI, so fall back to the first (default) item
+    if *CI && let Some(first) = <T as AllItems>::all().into_iter().next() {
+        return Ok(first);
+    }
     Select::new(
         &format!("{}:", <T as Name>::NAME),
         <T as AllItems>::all().into_iter().collect(),
@@ -43,6 +47,10 @@ pub fn check_prompt<T>() -> InquireResult<T>
 where
     T: Name + Flags + Display + BitOr<Output = T> + Copy,
 {
+    // Prompts can't be answered in CI, so fall back to no flags being set
+    if *CI {
+        return Ok(T::empty());
+    }
     MultiSelect::new(
         &format!("{}:", <T as Name>::NAME),
         T::all().iter().collect(),
