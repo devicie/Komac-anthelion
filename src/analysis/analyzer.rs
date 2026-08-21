@@ -10,7 +10,7 @@ use winget_types::{
     locale::{Copyright, PackageName, Publisher},
 };
 
-use super::{FontInfo, PeInfo};
+use super::{FontInfo, PeInfo, SiblingFiles};
 use crate::analysis::{
     Installers,
     extensions::FileExtension,
@@ -53,12 +53,43 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
         )
     }
 
+    /// Analyses a file given the small files from beside it, such as from the same folder of a
+    /// ZIP, which some installers read their settings from.
+    pub(crate) fn with_sibling_files(
+        reader: &'reader mut R,
+        file_name: &str,
+        font_analysis: FontAnalysis,
+        siblings: &SiblingFiles,
+    ) -> Result<Self> {
+        Self::analyze(reader, file_name, font_analysis, None, &[], siblings, None)
+    }
+
     pub(crate) fn with_installer_type(
         reader: &'reader mut R,
         file_name: &str,
         font_analysis: FontAnalysis,
         installer_type: Option<InstallerType>,
         nested_installer_files: &[String],
+        target_architecture: Option<Architecture>,
+    ) -> Result<Self> {
+        Self::analyze(
+            reader,
+            file_name,
+            font_analysis,
+            installer_type,
+            nested_installer_files,
+            &SiblingFiles::default(),
+            target_architecture,
+        )
+    }
+
+    fn analyze(
+        reader: &'reader mut R,
+        file_name: &str,
+        font_analysis: FontAnalysis,
+        installer_type: Option<InstallerType>,
+        nested_installer_files: &[String],
+        siblings: &SiblingFiles,
         target_architecture: Option<Architecture>,
     ) -> Result<Self> {
         let path = Utf8Path::new(file_name);
@@ -111,7 +142,7 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                 });
             }
             FileExtension::Exe => {
-                let mut exe = Exe::new(reader, target_architecture)?;
+                let mut exe = Exe::new(reader, siblings, target_architecture)?;
                 return Ok(Self {
                     installers: exe.installers(),
                     copyright: exe

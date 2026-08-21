@@ -5,13 +5,14 @@ use inno::{Inno, InnoInner, error::InnoError};
 use tracing::warn;
 use winget_types::installer::{Architecture, Installer, InstallerType};
 
-use super::{super::Installers, AdvancedInstaller, Burn, Nsis, Squirrel};
+use super::{super::Installers, AdvancedInstaller, Burn, InstallShield, Nsis, Squirrel};
 use crate::{
     analysis::{
-        PeInfo,
+        PeInfo, SiblingFiles,
         installers::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
+            installshield::InstallShieldError,
             nsis::NsisError,
             pe::{PE, VSVersionInfo},
             squirrel::SquirrelError,
@@ -38,21 +39,26 @@ pub enum ExeType {
     AdvancedInstaller(AdvancedInstaller),
     Burn(Box<Burn>),
     Inno(Box<InnoInner>),
+    InstallShield(Box<InstallShield>),
     Nsis(Nsis),
     Squirrel(Squirrel),
     Generic(Box<Installer>),
 }
 
 impl Exe {
+    /// Analyses an exe, given the small files from beside it that some installers read their
+    /// settings from.
     pub fn new<R: Read + Seek>(
         reader: R,
+        siblings: &SiblingFiles,
         target_architecture: Option<Architecture>,
     ) -> Result<Self> {
-        Self::new_at_depth(reader, 0, target_architecture)
+        Self::new_at_depth(reader, siblings, 0, target_architecture)
     }
 
     fn new_at_depth<R: Read + Seek>(
         mut reader: R,
+        siblings: &SiblingFiles,
         depth: usize,
         target_architecture: Option<Architecture>,
     ) -> Result<Self> {
@@ -133,6 +139,22 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
+        match InstallShield::new(&mut reader, &pe, siblings) {
+            Ok(installshield) => {
+                return Ok(Self {
+                    r#type: ExeType::InstallShield(Box::new(installshield)),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(InstallShieldError::NotInstallShieldFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
         match Nsis::new(&mut reader, &pe, target_architecture) {
             Ok(nsis) => {
                 return Ok(Self {
@@ -172,6 +194,7 @@ impl Exe {
             setup_archive = true;
             let mut inner = Self::new_at_depth(
                 Cursor::new(setup.data),
+                &SiblingFiles::default(),
                 depth + 1,
                 target_architecture.or(setup.architecture),
             )?;
@@ -222,6 +245,7 @@ impl Installers for Exe {
             ExeType::AdvancedInstaller(advanced) => advanced.installers(),
             ExeType::Burn(burn) => burn.installers(),
             ExeType::Inno(inno) => inno.installers(),
+            ExeType::InstallShield(installshield) => installshield.installers(),
             ExeType::Nsis(nsis) => nsis.installers(),
             ExeType::Squirrel(squirrel) => squirrel.installers(),
             ExeType::Generic(installer) => vec![*installer.clone()],
