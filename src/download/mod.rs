@@ -2,6 +2,7 @@ mod downloader;
 mod downloads;
 mod file;
 mod pre_download;
+pub(crate) mod file;
 
 use std::fmt;
 
