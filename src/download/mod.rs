@@ -1,6 +1,6 @@
 mod downloader;
 mod downloads;
-mod file;
+pub(crate) mod file;
 mod pre_download;
 
 use std::fmt;
@@ -30,6 +30,16 @@ impl Download {
             url,
             file_name,
             response: Some(response),
+        }
+    }
+
+    /// Creates a new [`Download`] for a file that is already on disk and so has no [`Response`].
+    #[inline]
+    pub const fn from_local(url: Url, file_name: String) -> Self {
+        Self {
+            url,
+            file_name,
+            response: None,
         }
     }
 
