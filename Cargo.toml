@@ -112,6 +112,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate", "def
 napi = { version = "3.12.1", features = ["async", "tokio_rt"] }
 napi-derive = "3.6.3"
 pulldown-cmark = "0.13.4"
+serini = "0.2.2"
 # Anthelion End
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
