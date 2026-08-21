@@ -3,7 +3,11 @@ mod submit_option;
 
 use std::time::Duration;
 
-use color_eyre::{Result, eyre::bail};
+use camino::{Utf8Path, Utf8PathBuf};
+use color_eyre::{
+    Result,
+    eyre::{bail, ensure},
+};
 use winget_types::installer::{InstallerManifest, InstallerType, NestedInstallerType};
 
 use crate::traits::InstallerManifestExt;
@@ -33,4 +37,12 @@ pub fn check_package_type(manifest: &InstallerManifest) -> Result<bool> {
     }
 
     Ok(has_font)
+}
+
+/// Parses a CLI argument into a [`Utf8PathBuf`], erroring if it isn't an existing file.
+pub fn is_valid_file(path: &str) -> Result<Utf8PathBuf> {
+    let path = Utf8Path::new(path);
+    ensure!(path.exists(), "{path} does not exist");
+    ensure!(path.is_file(), "{path} is not a file");
+    Ok(path.to_path_buf())
 }

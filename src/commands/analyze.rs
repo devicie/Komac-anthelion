@@ -1,19 +1,20 @@
 use std::{
     fs::File,
     io,
-    io::{Read, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
 };
 
 use anstream::stdout;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use clap::Parser;
-use color_eyre::{Result, eyre::ensure};
+use color_eyre::Result;
 use serde::Serialize;
-use sha2::{Digest, Sha256, digest::Output};
 use winget_types::{Sha256String, installer::Installer};
 
 use crate::{
     analysis::{Analyzer, FontInfo, PeInfo, installers::font::FontAnalysis},
+    commands::utils::is_valid_file,
+    download::file::sha256_digest,
     manifests::{print_manifest, to_yaml_string},
 };
 
@@ -115,26 +116,4 @@ struct AnalyzeMultiOutput<'a> {
 struct AnalyzeFontOutput<'a> {
     font_info: &'a FontInfo,
     installer: &'a Installer,
-}
-
-fn sha256_digest<R: Read>(mut reader: R) -> io::Result<Output<Sha256>> {
-    let mut digest = Sha256::new();
-    let mut buffer = [0; 1 << 13];
-
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-
-    Ok(digest.finalize())
-}
-
-fn is_valid_file(path: &str) -> Result<Utf8PathBuf> {
-    let path = Utf8Path::new(path);
-    ensure!(path.exists(), "{path} does not exist");
-    ensure!(path.is_file(), "{path} is not a file");
-    Ok(path.to_path_buf())
 }
