@@ -1,14 +1,15 @@
 use std::{
     collections::BTreeSet,
-    mem,
+    io, mem,
     num::{NonZeroU32, NonZeroUsize},
     path::PathBuf,
     str::FromStr,
 };
 
 use anstream::println;
+use camino::Utf8PathBuf;
 use clap::Parser;
-use color_eyre::eyre::{Result, bail, eyre};
+use color_eyre::eyre::{Result, bail, ensure, eyre};
 use indicatif::ProgressBar;
 use inquire::CustomType;
 use itertools::Itertools;
@@ -35,8 +36,8 @@ use winget_types::{
 };
 
 use crate::{
-    commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type},
-    download::Downloader,
+    commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type, is_valid_file},
+    download::{DownloadedFile, Downloader, Downloads},
     github::{
         GITHUB_HOST,
         client::GitHub,
@@ -67,6 +68,10 @@ pub struct NewVersion {
     /// The list of package installers
     #[arg(short, long, num_args = 1.., value_hint = clap::ValueHint::Url)]
     urls: Vec<Url>,
+
+    /// The list of local files to use instead of downloading the urls
+    #[arg(short, long, num_args = 1.., requires = "urls", value_parser = is_valid_file, value_hint = clap::ValueHint::FilePath)]
+    files: Vec<Utf8PathBuf>,
 
     /// Run without prompting, using package data from a JSON object
     ///
@@ -128,6 +133,15 @@ impl NewVersion {
             .transpose()?;
         let non_interactive = input.is_some();
         let dry_run = self.dry_run || (non_interactive && !self.submit);
+
+        if !self.files.is_empty() {
+            ensure!(
+                self.urls.len() == self.files.len(),
+                "Number of URLs ({}) must match number of files ({})",
+                self.urls.len(),
+                self.files.len()
+            );
+        }
 
         if non_interactive && self.token.is_none() {
             bail!("Non-interactive mode requires --token or GITHUB_TOKEN");
@@ -201,8 +215,17 @@ impl NewVersion {
             }
         });
 
-        let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
-        let mut files = downloader.download(urls.iter().cloned()).await?;
+        let mut files = if self.files.is_empty() {
+            let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
+            downloader.download(urls.iter().cloned()).await?
+        } else {
+            self.files
+                .iter()
+                .zip(urls.iter().cloned())
+                .map(|(path, url)| DownloadedFile::from_local(path, url))
+                .collect::<io::Result<Vec<_>>>()
+                .map(Downloads::new)?
+        };
         let mut download_results = files.analyze(None).await?;
 
         let mut installers = Vec::new();
@@ -210,11 +233,12 @@ impl NewVersion {
             let mut silent = None;
             let mut silent_with_progress = None;
             let mut custom = None;
+            // Installers that the analyzer already found switches for don't need to be prompted
+            // for them again
             if !non_interactive
-                && analyzer
-                    .installers
-                    .iter()
-                    .any(|installer| installer.r#type == Some(InstallerType::Exe))
+                && analyzer.installers.iter().any(|installer| {
+                    installer.r#type == Some(InstallerType::Exe) && installer.switches.is_empty()
+                })
             {
                 if confirm_prompt(&format!("Is {} a portable exe?", analyzer.file_name))? {
                     for installer in &mut analyzer.installers {
