@@ -507,12 +507,14 @@ impl NewVersion {
         let mut changes =
             manifests.create(&identifier, &version, self.created_with.as_deref(), is_font);
 
-        if dry_run {
+        // A dry run has nothing to submit, but `--output` is still honoured. Writing happens after
+        // this so that it captures any edits made at the prompt.
+        let submit_option = if dry_run {
             print_changes(changes.iter().map(Change::manifest));
-            return Ok(());
-        }
-
-        let submit_option = SubmitOption::prompt(&mut changes, &identifier, &version, self.submit)?;
+            SubmitOption::Exit
+        } else {
+            SubmitOption::prompt(&mut changes, &identifier, &version, self.submit)?
+        };
 
         let package_path = PackagePath::new(&identifier, Some(&version), None, is_font);
         if let Some(output) = self.output.map(|out| out.join(package_path.as_str())) {
