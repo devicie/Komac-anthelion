@@ -9,6 +9,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use tokio::runtime::Handle;
+use tracing::debug;
 
 use crate::{
     environment::CI,
@@ -48,11 +49,31 @@ pub struct TokenManager {
 #[bon]
 impl TokenManager {
     pub async fn handle(token: Option<SecretString>) -> Result<Self, TokenError> {
+        Self::resolve(token, true)
+            .await?
+            .ok_or(TokenError::NoTokenInCI)
+    }
+
+    /// Resolves a token in the same way as [`TokenManager::handle`], but returns `Ok(None)` rather
+    /// than prompting or failing when there is no token to be found.
+    ///
+    /// This is for runs that only need unauthenticated, read-only access to GitHub, such as a dry
+    /// run that writes manifests out locally instead of submitting them.
+    pub async fn handle_optional(token: Option<SecretString>) -> Result<Option<Self>, TokenError> {
+        Self::resolve(token, false).await
+    }
+
+    async fn resolve(
+        token: Option<SecretString>,
+        required: bool,
+    ) -> Result<Option<Self>, TokenError> {
         // Token rules:
         // - If caller passed `--token`: validate it and fail if invalid.
-        // - Otherwise try keyring:
+        // - Otherwise try the platform's credential store. An unusable store (a headless Linux
+        //   machine with no D-Bus session, for example) is treated as having no stored token.
         //     * In CI: if no token or if stored token is invalid -> error (never prompt).
         //     * Interactive: if no stored token or stored token is invalid -> prompt and store.
+        // - If a token isn't `required`, no token at all is fine and nothing is prompted for.
 
         let client = retrying_client(
             ReqwestClient::builder()
@@ -65,7 +86,16 @@ impl TokenManager {
         let credential = if token_passed {
             None
         } else {
-            Some(Self::credential()?)
+            // A credential store that can't be opened is not fatal - the token can still come from
+            // `--token`, `GITHUB_TOKEN`, or a prompt. CI runners routinely have no credential
+            // store at all, so don't even mention it there.
+            Self::credential()
+                .inspect_err(|error| {
+                    if !*CI {
+                        debug!(%error, "Failed to open the credential store");
+                    }
+                })
+                .ok()
         };
 
         let token = if let Some(token) = token {
@@ -73,9 +103,13 @@ impl TokenManager {
         } else if let Some(ref credential) = credential {
             match credential.get_password() {
                 Ok(token) => Some(SecretString::new(token.into_boxed_str())),
-                Err(keyring_core::Error::NoEntry) if *CI => return Err(TokenError::NoTokenInCI),
-                Err(keyring_core::Error::NoEntry) => None, // No stored token, must prompt
-                Err(error) => return Err(TokenError::Keyring(error)),
+                Err(keyring_core::Error::NoEntry) => None, // No stored token
+                Err(error) => {
+                    if !*CI {
+                        debug!(%error, "Failed to read the stored token");
+                    }
+                    None
+                }
             }
         } else {
             None
@@ -83,13 +117,24 @@ impl TokenManager {
 
         if let Some(token) = token {
             match Self::validate(&client, token.expose_secret()).await {
-                Ok(()) => return Ok(Self { token }),
-                Err(TokenError::InvalidToken) if token_passed || *CI => {
+                Ok(()) => return Ok(Some(Self { token })),
+                Err(TokenError::InvalidToken) if token_passed => {
                     return Err(TokenError::InvalidToken);
+                }
+                Err(TokenError::InvalidToken) if *CI => {
+                    if required {
+                        return Err(TokenError::InvalidToken);
+                    }
+                    return Ok(None);
                 }
                 Err(TokenError::InvalidToken) => {}
                 Err(err) => return Err(err),
             }
+        }
+
+        // There's no usable token, and a prompt can't be answered in CI or when a token is optional.
+        if !required || *CI {
+            return Ok(None);
         }
 
         let validated_token = Self::prompt().client(&client).call()?;
@@ -102,9 +147,9 @@ impl TokenManager {
             println!("Successfully stored token in platform's secure storage");
         }
 
-        Ok(Self {
+        Ok(Some(Self {
             token: validated_token,
-        })
+        }))
     }
 
     #[builder]
