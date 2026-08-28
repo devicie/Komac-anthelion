@@ -17,6 +17,7 @@ use ordinal::Ordinal;
 use owo_colors::OwoColorize;
 use secrecy::SecretString;
 use serde::Deserialize;
+use tracing::warn;
 use winget_types::{
     LanguageTag, PackageIdentifier, PackageVersion, VersionManifest,
     installer::{
@@ -38,6 +39,7 @@ use winget_types::{
 use crate::{
     commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type, is_valid_file},
     download::{DownloadedFile, Downloader, Downloads},
+    environment::CI,
     github::{
         GITHUB_HOST,
         client::GitHub,
@@ -131,7 +133,8 @@ impl NewVersion {
             .take()
             .map(|json| serde_json::from_str::<NonInteractiveInput>(&json))
             .transpose()?;
-        let non_interactive = input.is_some();
+        // Prompts can't be answered in CI, so treat a CI run as non-interactive
+        let non_interactive = input.is_some() || *CI;
         let dry_run = self.dry_run || (non_interactive && !self.submit);
 
         if !self.files.is_empty() {
@@ -143,12 +146,24 @@ impl NewVersion {
             );
         }
 
-        if non_interactive && self.token.is_none() {
+        if non_interactive && !dry_run && self.token.is_none() {
             bail!("Non-interactive mode requires --token or GITHUB_TOKEN");
         }
 
-        let token_manager = TokenManager::handle(self.token).await?;
-        let github = GitHub::new(token_manager)?;
+        // A dry run only reads public manifests from winget-pkgs, so it can go ahead without a
+        // token if there isn't one to be found. Submitting always needs one.
+        let mut authenticated = true;
+        let github = if dry_run {
+            match TokenManager::handle_optional(self.token).await? {
+                Some(token_manager) => GitHub::new(token_manager)?,
+                None => {
+                    authenticated = false;
+                    GitHub::unauthenticated()?
+                }
+            }
+        } else {
+            GitHub::new(TokenManager::handle(self.token).await?)?
+        };
 
         let identifier =
             resolve_required(self.identifier, None::<&str>, non_interactive, "identifier")?;
@@ -163,7 +178,10 @@ impl NewVersion {
 
         let version = resolve_required(self.version, None::<&str>, non_interactive, "version")?;
 
-        let mut package = package.into_versioned(&version, &github).await?;
+        let check_existing_pr = !self.skip_pr_check && !dry_run;
+        let mut package = package
+            .into_versioned(&version, &github, check_existing_pr)
+            .await?;
         let mut locales = package
             .manifests
             .take()
@@ -172,7 +190,7 @@ impl NewVersion {
         if let Some(input) = &mut input {
             input.add_locales(&mut locales, &identifier, &version)?;
         }
-        if !self.skip_pr_check && !dry_run && !package.prompt_existing_pr()? {
+        if check_existing_pr && !package.prompt_existing_pr()? {
             return Ok(());
         }
 
@@ -332,7 +350,14 @@ impl NewVersion {
         }
 
         let mut github_values = match github_values.await? {
-            Some(future) => Some(future?),
+            Some(Ok(values)) => Some(values),
+            // Release notes and repository metadata come from the GraphQL API, which always needs
+            // a token. Without one, carry on with whatever the installers themselves provide.
+            Some(Err(error)) if !authenticated => {
+                warn!(%error, "Failed to retrieve values from GitHub without a token");
+                None
+            }
+            Some(Err(error)) => return Err(error.into()),
             None => None,
         };
 

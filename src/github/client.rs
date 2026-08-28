@@ -105,6 +105,19 @@ impl GitHub {
         )))
     }
 
+    /// Creates a client without a token.
+    ///
+    /// Only unauthenticated endpoints work, which for winget-pkgs means reading public manifests
+    /// under a much lower rate limit. Anything that writes, and anything using the GraphQL API,
+    /// needs [`GitHub::new`].
+    pub fn unauthenticated() -> Result<Self, GitHubError> {
+        Ok(Self(super::retry::client(
+            Client::builder()
+                .default_headers(default_headers(None))
+                .build()?,
+        )))
+    }
+
     pub async fn get_manifests(
         &self,
         identifier: &PackageIdentifier,
