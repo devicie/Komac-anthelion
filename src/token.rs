@@ -9,6 +9,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use tokio::runtime::Handle;
+use tracing::debug;
 
 use crate::{
     environment::CI,
@@ -50,7 +51,8 @@ impl TokenManager {
     pub async fn handle(token: Option<SecretString>) -> Result<Self, TokenError> {
         // Token rules:
         // - If caller passed `--token`: validate it and fail if invalid.
-        // - Otherwise try keyring:
+        // - Otherwise try the platform's credential store. An unusable store (a headless Linux
+        //   machine with no D-Bus session, for example) is treated as having no stored token:
         //     * In CI: if no token or if stored token is invalid -> error (never prompt).
         //     * Interactive: if no stored token or stored token is invalid -> prompt and store.
 
@@ -65,7 +67,16 @@ impl TokenManager {
         let credential = if token_passed {
             None
         } else {
-            Some(Self::credential()?)
+            // A credential store that can't be opened is not fatal - the token can still come from
+            // `--token`, `GITHUB_TOKEN`, or a prompt. CI runners routinely have no credential
+            // store at all, so don't even mention it there.
+            Self::credential()
+                .inspect_err(|error| {
+                    if !*CI {
+                        debug!(%error, "Failed to open the credential store");
+                    }
+                })
+                .ok()
         };
 
         let token = if let Some(token) = token {
@@ -73,9 +84,13 @@ impl TokenManager {
         } else if let Some(ref credential) = credential {
             match credential.get_password() {
                 Ok(token) => Some(SecretString::new(token.into_boxed_str())),
-                Err(keyring_core::Error::NoEntry) if *CI => return Err(TokenError::NoTokenInCI),
-                Err(keyring_core::Error::NoEntry) => None, // No stored token, must prompt
-                Err(error) => return Err(TokenError::Keyring(error)),
+                Err(keyring_core::Error::NoEntry) => None, // No stored token
+                Err(error) => {
+                    if !*CI {
+                        debug!(%error, "Failed to read the stored token");
+                    }
+                    None
+                }
             }
         } else {
             None
@@ -90,6 +105,11 @@ impl TokenManager {
                 Err(TokenError::InvalidToken) => {}
                 Err(err) => return Err(err),
             }
+        }
+
+        // There's no usable token, and a prompt can't be answered in CI
+        if *CI {
+            return Err(TokenError::NoTokenInCI);
         }
 
         let validated_token = Self::prompt().client(&client).call()?;
