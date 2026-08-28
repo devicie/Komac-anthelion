@@ -4,9 +4,7 @@ use bzip2::read::BzDecoder;
 use flate2::read::ZlibDecoder;
 use lzma_rust2::LzmaReader;
 
-use super::LzmaStreamHeader;
-
-use super::nsis_bzip2;
+use super::{LzmaStreamHeader, nsis_bzip2};
 
 pub enum Decoder<R: Read + Seek> {
     Lzma(Box<LzmaReader<R>>),
