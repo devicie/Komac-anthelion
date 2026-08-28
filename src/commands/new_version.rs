@@ -37,6 +37,7 @@ use winget_types::{
 use crate::{
     commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type, is_valid_file},
     download::{DownloadedFile, Downloader, Downloads},
+    environment::CI,
     github::{
         GITHUB_HOST,
         client::GitHub,
@@ -135,7 +136,8 @@ impl NewVersion {
             .take()
             .map(|json| serde_json::from_str::<NonInteractiveInput>(&json))
             .transpose()?;
-        let non_interactive = input.is_some();
+        // Prompts can't be answered in CI, so treat a CI run as non-interactive
+        let non_interactive = input.is_some() || *CI;
         let dry_run = self.dry_run || (non_interactive && !self.submit);
 
         if !self.files.is_empty() {
