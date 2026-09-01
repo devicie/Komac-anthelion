@@ -1,20 +1,22 @@
 use std::{
     collections::BTreeSet,
-    mem,
+    io, mem,
     num::{NonZeroU32, NonZeroUsize},
     path::PathBuf,
     str::FromStr,
 };
 
 use anstream::println;
+use camino::Utf8PathBuf;
 use clap::Parser;
-use color_eyre::eyre::{Result, bail, eyre};
+use color_eyre::eyre::{Result, bail, ensure, eyre};
 use indicatif::ProgressBar;
 use inquire::CustomType;
 use itertools::Itertools;
 use ordinal::Ordinal;
 use owo_colors::OwoColorize;
 use secrecy::SecretString;
+use tracing::warn;
 use winget_types::{
     LanguageTag, PackageIdentifier, PackageVersion, VersionManifest,
     installer::{
@@ -33,8 +35,9 @@ use winget_types::{
 };
 
 use crate::{
-    commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type},
-    download::Downloader,
+    commands::utils::{SPINNER_TICK_RATE, SubmitOption, check_package_type, is_valid_file},
+    download::{DownloadedFile, Downloader, Downloads},
+    environment::CI,
     github::{
         GITHUB_HOST,
         client::GitHub,
@@ -65,6 +68,10 @@ pub struct NewVersion {
     /// The list of package installers
     #[arg(short, long, num_args = 1.., value_hint = clap::ValueHint::Url)]
     urls: Vec<Url>,
+
+    /// The list of local files to use instead of downloading the urls
+    #[arg(short, long, num_args = 1.., requires = "urls", value_parser = is_valid_file, value_hint = clap::ValueHint::FilePath)]
+    files: Vec<Utf8PathBuf>,
 
     #[arg(long)]
     package_locale: Option<LanguageTag>,
@@ -162,15 +169,37 @@ pub struct NewVersion {
 
 impl NewVersion {
     pub async fn run(self) -> Result<()> {
-        let non_interactive = self.non_interactive;
+        // Prompts can't be answered in CI, so treat a CI run as non-interactive
+        let non_interactive = self.non_interactive || *CI;
         let dry_run = self.dry_run || (non_interactive && !self.submit);
 
-        if non_interactive && self.token.is_none() {
+        if !self.files.is_empty() {
+            ensure!(
+                self.urls.len() == self.files.len(),
+                "Number of URLs ({}) must match number of files ({})",
+                self.urls.len(),
+                self.files.len()
+            );
+        }
+
+        if non_interactive && !dry_run && self.token.is_none() {
             bail!("Non-interactive mode requires --token or GITHUB_TOKEN");
         }
 
-        let token_manager = TokenManager::handle(self.token).await?;
-        let github = GitHub::new(token_manager)?;
+        // A dry run only reads public manifests from winget-pkgs, so it can go ahead without a
+        // token if there isn't one to be found. Submitting always needs one.
+        let mut authenticated = true;
+        let github = if dry_run {
+            match TokenManager::handle_optional(self.token).await? {
+                Some(token_manager) => GitHub::new(token_manager)?,
+                None => {
+                    authenticated = false;
+                    GitHub::unauthenticated()?
+                }
+            }
+        } else {
+            GitHub::new(TokenManager::handle(self.token).await?)?
+        };
 
         let identifier = resolve_required(
             self.identifier,
@@ -189,8 +218,11 @@ impl NewVersion {
 
         let version = resolve_required(self.version, None::<&str>, non_interactive, "--version")?;
 
-        let mut package = package.into_versioned(&version, &github).await?;
-        if !self.skip_pr_check && !dry_run && !package.prompt_existing_pr()? {
+        let check_existing_pr = !self.skip_pr_check && !dry_run;
+        let mut package = package
+            .into_versioned(&version, &github, check_existing_pr)
+            .await?;
+        if check_existing_pr && !package.prompt_existing_pr()? {
             return Ok(());
         }
 
@@ -233,8 +265,17 @@ impl NewVersion {
             }
         });
 
-        let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
-        let mut files = downloader.download(urls.iter().cloned()).await?;
+        let mut files = if self.files.is_empty() {
+            let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
+            downloader.download(urls.iter().cloned()).await?
+        } else {
+            self.files
+                .iter()
+                .zip(urls.iter().cloned())
+                .map(|(path, url)| DownloadedFile::from_local(path, url))
+                .collect::<io::Result<Vec<_>>>()
+                .map(Downloads::new)?
+        };
         let mut download_results = files.analyze().await?;
 
         let mut installers = Vec::new();
@@ -242,11 +283,12 @@ impl NewVersion {
             let mut silent = None;
             let mut silent_with_progress = None;
             let mut custom = None;
+            // Installers that the analyzer already found switches for don't need to be prompted
+            // for them again
             if !non_interactive
-                && analyzer
-                    .installers
-                    .iter()
-                    .any(|installer| installer.r#type == Some(InstallerType::Exe))
+                && analyzer.installers.iter().any(|installer| {
+                    installer.r#type == Some(InstallerType::Exe) && installer.switches.is_empty()
+                })
             {
                 if confirm_prompt(&format!("Is {} a portable exe?", analyzer.file_name))? {
                     for installer in &mut analyzer.installers {
@@ -340,7 +382,14 @@ impl NewVersion {
         }
 
         let mut github_values = match github_values.await? {
-            Some(future) => Some(future?),
+            Some(Ok(values)) => Some(values),
+            // Release notes and repository metadata come from the GraphQL API, which always needs
+            // a token. Without one, carry on with whatever the installers themselves provide.
+            Some(Err(error)) if !authenticated => {
+                warn!(%error, "Failed to retrieve values from GitHub without a token");
+                None
+            }
+            Some(Err(error)) => return Err(error.into()),
             None => None,
         };
 
@@ -483,12 +532,14 @@ impl NewVersion {
         let mut changes =
             manifests.create(&identifier, &version, self.created_with.as_deref(), is_font);
 
-        if dry_run {
+        // A dry run has nothing to submit, but `--output` is still honoured. Writing happens after
+        // this so that it captures any edits made at the prompt.
+        let submit_option = if dry_run {
             print_changes(changes.iter().map(Change::manifest));
-            return Ok(());
-        }
-
-        let submit_option = SubmitOption::prompt(&mut changes, &identifier, &version, self.submit)?;
+            SubmitOption::Exit
+        } else {
+            SubmitOption::prompt(&mut changes, &identifier, &version, self.submit)?
+        };
 
         let package_path = PackagePath::new(&identifier, Some(&version), None, is_font);
         if let Some(output) = self.output.map(|out| out.join(package_path.as_str())) {

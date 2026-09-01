@@ -95,10 +95,17 @@ impl<'identifier> Package<'identifier, '_, Unversioned> {
         self,
         version: &'version PackageVersion,
         github: &'a GitHub,
+        check_existing_pr: bool,
     ) -> Result<Package<'identifier, 'version, Versioned>, GitHubError> {
-        let existing_pr = github
-            .get_existing_pull_request(self.identifier, version, false)
-            .await?;
+        // Searching for an existing pull request uses the GraphQL API, so it needs a token. Skip it
+        // when the caller isn't going to look at the result.
+        let existing_pr = if check_existing_pr {
+            github
+                .get_existing_pull_request(self.identifier, version, false)
+                .await?
+        } else {
+            None
+        };
 
         Ok(Package {
             identifier: self.identifier,

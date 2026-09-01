@@ -6,7 +6,7 @@ use std::{
 use camino::Utf8Path;
 use color_eyre::eyre::Result;
 use winget_types::{
-    installer::Installer,
+    installer::{Architecture, Installer},
     locale::{Copyright, PackageName, Publisher},
     utils::ValidFileExtensions,
 };
@@ -64,8 +64,10 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
             }
             ValidFileExtensions::Exe => {
                 let mut exe = Exe::new(reader)?;
+                let mut installers = exe.installers();
+                override_x86_from_file_name(&mut installers, file_name);
                 return Ok(Self {
-                    installers: exe.installers(),
+                    installers,
                     copyright: exe
                         .legal_copyright
                         .take()
@@ -118,6 +120,88 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
     }
 }
 
+/// Architecture names that can appear in an installer's file name, and the architecture that they
+/// indicate.
+///
+/// Only 64-bit and ARM64 names are listed, because this table is used solely to correct an x86
+/// architecture that came from a 32-bit installer stub. Longer names come first so that the longest
+/// name matching at a given position wins.
+const FILE_NAME_ARCHITECTURES: &[(&str, Architecture)] = &[
+    ("winarm64", Architecture::Arm64),
+    ("aarch64", Architecture::Arm64),
+    ("arm64ec", Architecture::Arm64),
+    ("x86_64", Architecture::X64),
+    ("x86-64", Architecture::X64),
+    ("win64a", Architecture::Arm64),
+    ("64-bit", Architecture::X64),
+    ("winx64", Architecture::X64),
+    ("64bit", Architecture::X64),
+    ("amd64", Architecture::X64),
+    ("arm64", Architecture::Arm64),
+    ("win64", Architecture::X64),
+    ("ia64", Architecture::X64),
+    ("x64", Architecture::X64),
+];
+
+/// Characters that may delimit an architecture name within a file name.
+const DELIMITERS: [u8; 8] = [b',', b'.', b'_', b'-', b'(', b')', b'+', b' '];
+
+/// Detects a 64-bit or ARM64 architecture from an installer's file name.
+///
+/// The rightmost delimited name wins, so `MyApp-win32-x64.exe` is x64 rather than being confused by
+/// the `win32` in the middle.
+///
+/// This deliberately doesn't use [`Architecture::from_url`], which expects a full URL and both
+/// misreads and panics on bare file names.
+fn architecture_from_file_name(file_name: &str) -> Option<Architecture> {
+    fn is_delimited_at(bytes: &[u8], start: usize, len: usize) -> bool {
+        (start == 0
+            || bytes
+                .get(start - 1)
+                .is_some_and(|byte| DELIMITERS.contains(byte)))
+            && (start + len == bytes.len()
+                || bytes
+                    .get(start + len)
+                    .is_some_and(|byte| DELIMITERS.contains(byte)))
+    }
+
+    let file_name = file_name.to_ascii_lowercase();
+    let bytes = file_name.as_bytes();
+
+    (0..bytes.len()).rev().find_map(|index| {
+        let rest = file_name.get(index..)?;
+        FILE_NAME_ARCHITECTURES
+            .iter()
+            .find(|(name, _)| rest.starts_with(*name) && is_delimited_at(bytes, index, name.len()))
+            .map(|&(_, architecture)| architecture)
+    })
+}
+
+/// Overrides the architecture of any x86 installer with the architecture named in the file name.
+///
+/// A 64-bit or ARM64 application is frequently shipped inside a 32-bit installer stub, in which
+/// case the PE header only describes the stub. The file name is a better hint than the stub's
+/// machine type when the two disagree, so it wins.
+fn override_x86_from_file_name(installers: &mut [Installer], file_name: &str) {
+    if !installers
+        .iter()
+        .any(|installer| installer.architecture.is_x86())
+    {
+        return;
+    }
+
+    let Some(architecture) = architecture_from_file_name(file_name) else {
+        return;
+    };
+
+    for installer in installers
+        .iter_mut()
+        .filter(|installer| installer.architecture.is_x86())
+    {
+        installer.architecture = architecture;
+    }
+}
+
 impl<R: Read + Seek> Default for Analyzer<'_, R> {
     fn default() -> Self {
         Self {
@@ -133,5 +217,66 @@ impl<R: Read + Seek> Default for Analyzer<'_, R> {
             installers: Vec::default(),
             zip: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use winget_types::installer::{Architecture, Installer};
+
+    use super::override_x86_from_file_name;
+
+    fn installer(architecture: Architecture) -> Installer {
+        Installer {
+            architecture,
+            ..Installer::default()
+        }
+    }
+
+    #[rstest]
+    #[case("MyApp-arm64.exe", Architecture::Arm64)]
+    #[case("MyApp_aarch64.exe", Architecture::Arm64)]
+    #[case("MyApp-amd64.exe", Architecture::X64)]
+    #[case("MyApp.x64.exe", Architecture::X64)]
+    #[case("MyApp-win64.exe", Architecture::X64)]
+    #[case("MyApp-x86_64.exe", Architecture::X64)]
+    #[case("MyApp-arm64ec.exe", Architecture::Arm64)]
+    // The rightmost architecture name wins
+    #[case("MyApp-win32-x64.exe", Architecture::X64)]
+    #[case("MyApp_x64_arm64.exe", Architecture::Arm64)]
+    fn overrides_x86_with_file_name_architecture(
+        #[case] file_name: &str,
+        #[case] expected: Architecture,
+    ) {
+        let mut installers = vec![installer(Architecture::X86)];
+
+        override_x86_from_file_name(&mut installers, file_name);
+
+        assert_eq!(installers[0].architecture, expected);
+    }
+
+    #[rstest]
+    #[case("MyApp.exe")]
+    #[case("MyApp-x86.exe")]
+    #[case("MyApp-win32.exe")]
+    #[case("MyApp-neutral.exe")]
+    // `x64` here is part of a longer word, so it isn't a delimited architecture name
+    #[case("MyAppx64Bridge.exe")]
+    fn keeps_x86_without_a_better_file_name_architecture(#[case] file_name: &str) {
+        let mut installers = vec![installer(Architecture::X86)];
+
+        override_x86_from_file_name(&mut installers, file_name);
+
+        assert_eq!(installers[0].architecture, Architecture::X86);
+    }
+
+    #[test]
+    fn does_not_override_a_non_x86_architecture() {
+        let mut installers = vec![installer(Architecture::Arm64)];
+
+        override_x86_from_file_name(&mut installers, "MyApp-x64.exe");
+
+        assert_eq!(installers[0].architecture, Architecture::Arm64);
     }
 }

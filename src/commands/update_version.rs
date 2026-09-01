@@ -1,12 +1,14 @@
 use std::{
     collections::BTreeSet,
+    io,
     num::{NonZeroU32, NonZeroUsize},
     path::PathBuf,
 };
 
 use anstream::println;
+use camino::Utf8PathBuf;
 use clap::Parser;
-use color_eyre::eyre::{Error, Result, bail};
+use color_eyre::eyre::{Error, Result, bail, ensure};
 use futures_util::TryFutureExt;
 use indicatif::ProgressBar;
 use itertools::Itertools;
@@ -20,8 +22,8 @@ use winget_types::{
 
 use crate::{
     analysis::Analyzer,
-    commands::utils::{SPINNER_TICK_RATE, SubmitOption},
-    download::Downloader,
+    commands::utils::{SPINNER_TICK_RATE, SubmitOption, is_valid_file},
+    download::{DownloadedFile, Downloader, Downloads},
     github::{
         GITHUB_HOST, GitHubError, WINGET_PKGS_FULL_NAME,
         client::{GitHub, GitHubValues},
@@ -46,6 +48,10 @@ pub struct UpdateVersion {
     /// The list of package installers
     #[arg(short, long, num_args = 1.., required = true, value_hint = clap::ValueHint::Url)]
     urls: Vec<Url>,
+
+    /// The list of local files to use instead of downloading the urls
+    #[arg(short, long, num_args = 1.., requires = "urls", value_parser = is_valid_file, value_hint = clap::ValueHint::FilePath)]
+    files: Vec<Utf8PathBuf>,
 
     /// Number of installers to download at the same time
     #[arg(long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
@@ -102,6 +108,15 @@ pub struct UpdateVersion {
 
 impl UpdateVersion {
     pub async fn run(mut self) -> Result<()> {
+        if !self.files.is_empty() {
+            ensure!(
+                self.urls.len() == self.files.len(),
+                "Number of URLs ({}) must match number of files ({})",
+                self.urls.len(),
+                self.files.len()
+            );
+        }
+
         let token_manager = TokenManager::handle(self.token.take()).await?;
         let github = GitHub::new(&token_manager)?;
 
@@ -124,10 +139,22 @@ impl UpdateVersion {
             .resolve_replace_version(package.versions(), package.latest_version())?
             .cloned();
 
-        let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
         let (mut github_values, mut files) = try_join!(
             self.fetch_github_values(&github).map_err(Error::new),
-            downloader.download(self.urls.iter().cloned()),
+            async {
+                if self.files.is_empty() {
+                    let downloader = Downloader::new_with_concurrent(self.concurrent_downloads)?;
+                    downloader.download(self.urls.iter().cloned()).await
+                } else {
+                    self.files
+                        .iter()
+                        .zip(self.urls.iter().cloned())
+                        .map(|(path, url)| DownloadedFile::from_local(path, url))
+                        .collect::<io::Result<Vec<_>>>()
+                        .map(Downloads::new)
+                        .map_err(Error::new)
+                }
+            },
         )?;
 
         let manifests = package.manifests_mut().unwrap();
@@ -181,13 +208,14 @@ impl UpdateVersion {
             font,
         );
 
-        if self.dry_run {
+        // A dry run has nothing to submit, but `--output` is still honoured. Writing happens after
+        // this so that it captures any edits made at the prompt.
+        let submit_option = if self.dry_run {
             print_changes(changes.iter().map(Change::manifest));
-            return Ok(());
-        }
-
-        let submit_option =
-            SubmitOption::prompt(&mut changes, &self.identifier, &self.version, self.submit)?;
+            SubmitOption::Exit
+        } else {
+            SubmitOption::prompt(&mut changes, &self.identifier, &self.version, self.submit)?
+        };
 
         let package_path = PackagePath::new(&self.identifier, Some(&self.version), None, font);
         if let Some(output) = self

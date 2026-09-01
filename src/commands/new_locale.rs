@@ -183,6 +183,20 @@ impl NewLocale {
             self.created_with.as_deref(),
         )?;
 
+        // A dry run has nothing to submit, but `--output` is still honoured. Writing happens after
+        // this so that it captures any edits made at the prompt.
+        let submit_option = if self.dry_run {
+            print_changes(changes.iter().map(Change::manifest));
+            SubmitOption::Exit
+        } else {
+            SubmitOption::prompt(
+                &mut changes,
+                &package_identifier,
+                &package_version,
+                self.submit,
+            )?
+        };
+
         if let Some(output) = self
             .output
             .as_ref()
@@ -194,18 +208,6 @@ impl NewLocale {
                 "Successfully".green()
             );
         }
-
-        if self.dry_run {
-            print_changes(changes.iter().map(Change::manifest));
-            return Ok(());
-        }
-
-        let submit_option = SubmitOption::prompt(
-            &mut changes,
-            &package_identifier,
-            &package_version,
-            self.submit,
-        )?;
 
         if submit_option.is_exit() {
             return Ok(());
