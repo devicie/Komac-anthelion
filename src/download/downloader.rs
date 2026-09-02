@@ -41,6 +41,14 @@ impl Downloader {
 
     const OCTET_STREAM: &'static str = "octet-stream";
 
+    // Plenty of vendor CDNs serve an installer they have no MIME mapping for as
+    // `text/plain`. Oracle's Java downloads and WinZip both do it, and both were
+    // rejected here despite the body being a real MSI (`d0 cf 11 e0` OLE header,
+    // 160 MB and 83 MB respectively). Accept it: a genuine error page is served as
+    // `text/html`, and anything that slips through is still rejected downstream by
+    // installer analysis, which reads the file rather than trusting a header.
+    const TEXT_PLAIN: &'static str = "text/plain";
+
     /// Creates a new Downloader with a maximum number of concurrent downloads of the number of
     /// logical cores the system has.
     ///
@@ -147,6 +155,9 @@ impl Downloader {
                     && !content_type
                         .as_bytes()
                         .starts_with(Self::APPLICATION.as_bytes())
+                    && !content_type
+                        .as_bytes()
+                        .starts_with(Self::TEXT_PLAIN.as_bytes())
             })
         {
             return Err(ContentTypeError::new(download.clone(), content_types));
@@ -230,11 +241,20 @@ impl Downloader {
 
         let mut stream = res.bytes_stream();
 
-        // Download the chunks asynchronously
+        // Download the chunks asynchronously.
+        //
+        // A send failing means the writer or hasher task has already exited, which for
+        // the writer means its last `write_all` returned an error. Reporting the send
+        // error would say `channel closed` and throw the real cause away — that is how a
+        // runner running out of disk showed up as `channel closed` on some downloads and
+        // `Disk quota exceeded` on others, purely depending on which side lost the race.
+        // Stop feeding the tasks and fall through to the join below, which surfaces the
+        // error the writer actually hit.
         while let Some(chunk) = stream.next().await.transpose()? {
             progress.inc(chunk.len() as u64);
-            hash_sender.send(chunk.clone())?;
-            write_sender.send(chunk)?;
+            if hash_sender.send(chunk.clone()).is_err() || write_sender.send(chunk).is_err() {
+                break;
+            }
         }
 
         drop(write_sender);
@@ -315,6 +335,8 @@ mod tests {
     #[case::missing(&[], true)]
     #[case::application(&["application/octet-stream"], true)]
     #[case::binary_octet_stream(&["binary/octet-stream"], true)]
+    #[case::text_plain(&["text/plain"], true)]
+    #[case::text_plain_with_charset(&["text/plain; charset=UTF-8"], true)]
     #[case::non_application(&["text/html"], false)]
     #[case::one_valid(&["text/html", "application/octet-stream"], true)]
     fn checks_content_types(#[case] content_types: &[&str], #[case] expected: bool) {
