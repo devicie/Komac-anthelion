@@ -10,7 +10,11 @@ use const_format::formatcp;
 pub use downloader::Downloader;
 pub use downloads::Downloads;
 pub use file::DownloadedFile;
-use reqwest::{Client, ClientBuilder, Response, header::HeaderValue, redirect::Policy};
+use reqwest::{
+    Client, ClientBuilder, Response, StatusCode,
+    header::{HeaderValue, USER_AGENT},
+    redirect::Policy,
+};
 use uuid::Uuid;
 use winget_types::utils::ValidFileExtensions;
 
@@ -35,15 +39,46 @@ impl Download {
             .is_ok_and(|response| response.status().is_success())
     }
 
+    /// Sends a GET for `url`, retrying once as a browser if the server answers 403.
+    ///
+    /// A handful of vendors serve their installer only to a browser-shaped `User-Agent`
+    /// and reject komac's `Microsoft-Delivery-Optimization` agent with a 403 — Contour
+    /// Design's SharePoint download links do this, returning the same bytes happily once
+    /// the agent looks like Chrome. The retry is scoped to 403 so the default agent stays
+    /// the one that is normally used, since other CDNs prefer it.
+    async fn get(client: &Client, url: url::Url) -> reqwest::Result<Response> {
+        const BROWSER_USER_AGENT: HeaderValue = HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        );
+
+        let response = client.get(url.clone()).send().await;
+
+        if response
+            .as_ref()
+            .is_ok_and(|response| response.status() == StatusCode::FORBIDDEN)
+        {
+            let retried = client
+                .get(url)
+                .header(USER_AGENT, BROWSER_USER_AGENT)
+                .send()
+                .await;
+            if Self::is_successful(&retried) {
+                return retried;
+            }
+        }
+
+        response
+    }
+
     async fn send(&mut self, client: &Client) -> reqwest::Result<Response> {
         let url = (**self.0).clone();
-        let response = client.get(url.clone()).send().await;
+        let response = Self::get(client, url.clone()).await;
 
         if url == *self.0.original_url() || Self::is_successful(&response) {
             return response;
         }
 
-        let response = client.get(self.0.original_url().clone()).send().await;
+        let response = Self::get(client, self.0.original_url().clone()).await;
         if Self::is_successful(&response) {
             self.0.use_original_url();
         }

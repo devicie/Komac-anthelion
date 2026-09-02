@@ -21,7 +21,7 @@ use tokio::{
 };
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads};
+use super::{Download, DownloadedFile, Downloads, file};
 
 pub struct Downloader {
     client: Client,
@@ -269,9 +269,9 @@ impl Downloader {
 
         Ok(DownloadedFile {
             url: download.into_url(),
-            file: temp_file,
             sha_256: Sha256String::from_digest(&sha_256),
-            file_name,
+            file_name: file::infer_extension(file_name, &temp_file)?,
+            file: temp_file,
             last_modified,
         })
     }
