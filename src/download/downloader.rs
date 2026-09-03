@@ -21,7 +21,7 @@ use tokio::{
 };
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads};
+use super::{Download, DownloadedFile, Downloads, file};
 
 pub struct Downloader {
     client: Client,
@@ -40,6 +40,8 @@ impl Downloader {
     const APPLICATION: &'static str = "application";
 
     const OCTET_STREAM: &'static str = "octet-stream";
+
+    const TEXT_PLAIN: &'static str = "text/plain";
 
     /// Creates a new Downloader with a maximum number of concurrent downloads of the number of
     /// logical cores the system has.
@@ -147,6 +149,9 @@ impl Downloader {
                     && !content_type
                         .as_bytes()
                         .starts_with(Self::APPLICATION.as_bytes())
+                    && !content_type
+                        .as_bytes()
+                        .starts_with(Self::TEXT_PLAIN.as_bytes())
             })
         {
             return Err(ContentTypeError::new(download.clone(), content_types));
@@ -233,8 +238,9 @@ impl Downloader {
         // Download the chunks asynchronously
         while let Some(chunk) = stream.next().await.transpose()? {
             progress.inc(chunk.len() as u64);
-            hash_sender.send(chunk.clone())?;
-            write_sender.send(chunk)?;
+            if hash_sender.send(chunk.clone()).is_err() || write_sender.send(chunk).is_err() {
+                break;
+            }
         }
 
         drop(write_sender);
@@ -249,9 +255,9 @@ impl Downloader {
 
         Ok(DownloadedFile {
             url: download.into_url(),
-            file: temp_file,
             sha_256: Sha256String::from_digest(&sha_256),
-            file_name,
+            file_name: file::infer_extension(file_name, &temp_file)?,
+            file: temp_file,
             last_modified,
         })
     }
@@ -315,6 +321,8 @@ mod tests {
     #[case::missing(&[], true)]
     #[case::application(&["application/octet-stream"], true)]
     #[case::binary_octet_stream(&["binary/octet-stream"], true)]
+    #[case::text_plain(&["text/plain"], true)]
+    #[case::text_plain_with_charset(&["text/plain; charset=UTF-8"], true)]
     #[case::non_application(&["text/html"], false)]
     #[case::one_valid(&["text/html", "application/octet-stream"], true)]
     fn checks_content_types(#[case] content_types: &[&str], #[case] expected: bool) {
