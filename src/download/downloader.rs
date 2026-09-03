@@ -41,12 +41,6 @@ impl Downloader {
 
     const OCTET_STREAM: &'static str = "octet-stream";
 
-    // Plenty of vendor CDNs serve an installer they have no MIME mapping for as
-    // `text/plain`. Oracle's Java downloads and WinZip both do it, and both were
-    // rejected here despite the body being a real MSI (`d0 cf 11 e0` OLE header,
-    // 160 MB and 83 MB respectively). Accept it: a genuine error page is served as
-    // `text/html`, and anything that slips through is still rejected downstream by
-    // installer analysis, which reads the file rather than trusting a header.
     const TEXT_PLAIN: &'static str = "text/plain";
 
     /// Creates a new Downloader with a maximum number of concurrent downloads of the number of
@@ -241,15 +235,7 @@ impl Downloader {
 
         let mut stream = res.bytes_stream();
 
-        // Download the chunks asynchronously.
-        //
-        // A send failing means the writer or hasher task has already exited, which for
-        // the writer means its last `write_all` returned an error. Reporting the send
-        // error would say `channel closed` and throw the real cause away — that is how a
-        // runner running out of disk showed up as `channel closed` on some downloads and
-        // `Disk quota exceeded` on others, purely depending on which side lost the race.
-        // Stop feeding the tasks and fall through to the join below, which surfaces the
-        // error the writer actually hit.
+        // Download the chunks asynchronously
         while let Some(chunk) = stream.next().await.transpose()? {
             progress.inc(chunk.len() as u64);
             if hash_sender.send(chunk.clone()).is_err() || write_sender.send(chunk).is_err() {

@@ -52,14 +52,7 @@ impl DownloadedFile {
 /// Gives `file_name` an extension inferred from `file`'s magic bytes when it does not
 /// already end in one that analysis can dispatch on.
 ///
-/// Analysis picks its parser purely from the file extension, so a download whose URL
-/// carries no usable extension fails outright — ImmyBot's installer redirects to
-/// `cdn.immy.bot/immyagent-versions/0.84.1-build.56537`, whose last path segment made
-/// komac report `Invalid file extension: 56537` for what is really an MSI.
-///
-/// Only the two unambiguous signatures are inferred. A zip container is deliberately
-/// left alone: `.zip`, `.msix` and `.appx` share it, and guessing produces a wrong
-/// manifest silently, which is worse than the loud failure.
+/// Zip containers are not inferred, as `.zip`, `.msix` and `.appx` share a signature.
 pub fn infer_extension(file_name: String, file: &File) -> io::Result<String> {
     const OLE_COMPOUND_FILE: &[u8] = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1";
     const PORTABLE_EXECUTABLE: &[u8] = b"MZ";
