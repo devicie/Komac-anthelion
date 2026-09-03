@@ -316,7 +316,10 @@ jobs:
         run: ls -R ./npm
 
       - parallel:
+          # Trusted Publishing for the upstream scope is bound to unpn-org/Komac, so this
+          # fork gets ENEEDAUTH. The GitHub release assets are what anthelion consumes.
           - name: Publish to npm
+            continue-on-error: true
             run: npm publish --provenance --access public
 
           - name: Create Release
