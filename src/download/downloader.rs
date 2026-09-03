@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads, PreDownload};
+use super::{Download, DownloadedFile, Downloads, PreDownload, file};
 use crate::{analysis::installers::msix_family::app_installer::AppInstaller, manifests::Url};
 
 pub struct Downloader {
@@ -240,6 +240,9 @@ impl Downloader {
 
         let sha_256 = hasher.finalize();
         progress.finish();
+
+        download.file_name =
+            file::infer_extension(std::mem::take(&mut download.file_name), &temp_file)?;
 
         Ok(DownloadedFile {
             download,
