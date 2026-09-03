@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads, PreDownload};
+use super::{Download, DownloadedFile, Downloads, PreDownload, file};
 use crate::{analysis::installers::msix_family::app_installer::AppInstaller, manifests::Url};
 
 pub struct Downloader {
@@ -36,6 +36,8 @@ impl Downloader {
     const FONT: &'static str = "font/";
 
     const OCTET_STREAM: &'static str = "octet-stream";
+
+    const TEXT_PLAIN: &'static str = "text/plain";
 
     /// Creates a new Downloader with a maximum number of concurrent downloads of the number of
     /// logical cores the system has.
@@ -149,6 +151,9 @@ impl Downloader {
                     .as_bytes()
                     .starts_with(Self::APPLICATION.as_bytes())
                 && !content_type.as_bytes().starts_with(Self::FONT.as_bytes())
+                && !content_type
+                    .as_bytes()
+                    .starts_with(Self::TEXT_PLAIN.as_bytes())
         }) {
             return Err(ContentTypeError::new(download.clone(), content_types));
         }
@@ -236,6 +241,9 @@ impl Downloader {
         let sha_256 = hasher.finalize();
         progress.finish();
 
+        download.file_name =
+            file::infer_extension(std::mem::take(&mut download.file_name), &temp_file)?;
+
         Ok(DownloadedFile {
             download,
             file: temp_file,
@@ -290,5 +298,36 @@ impl fmt::Display for ContentTypeError {
             font = Downloader::FONT,
             octet_stream = Downloader::OCTET_STREAM
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::manifests::Url;
+
+    #[rstest]
+    #[case::missing(&[], true)]
+    #[case::application(&["application/octet-stream"], true)]
+    #[case::binary_octet_stream(&["binary/octet-stream"], true)]
+    #[case::text_plain(&["text/plain"], true)]
+    #[case::text_plain_with_charset(&["text/plain; charset=UTF-8"], true)]
+    #[case::font(&["font/woff2"], true)]
+    #[case::non_application(&["text/html"], false)]
+    #[case::one_valid(&["text/html", "application/octet-stream"], true)]
+    fn checks_content_types(#[case] content_types: &[&str], #[case] expected: bool) {
+        let download =
+            PreDownload::new("https://example.com/installer.exe".parse::<Url>().unwrap());
+        let mut headers = HeaderMap::new();
+        for content_type in content_types {
+            headers.append(CONTENT_TYPE, content_type.parse().unwrap());
+        }
+
+        assert_eq!(
+            Downloader::check_content_types(&download, headers.get_all(CONTENT_TYPE)).is_ok(),
+            expected
+        );
     }
 }
