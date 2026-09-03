@@ -22,13 +22,26 @@ impl PeInfo {
     }
 
     pub fn file_version(&self) -> Option<&str> {
-        self.string_file_info.get("FileVersion").map(String::as_str)
+        Self::dotted(
+            self.string_file_info.get("FileVersion"),
+            &self.fixed_file_info.file_version,
+        )
     }
 
     pub fn product_version(&self) -> Option<&str> {
-        self.string_file_info
-            .get("ProductVersion")
-            .map(String::as_str)
+        Self::dotted(
+            self.string_file_info.get("ProductVersion"),
+            &self.fixed_file_info.product_version,
+        )
+    }
+
+    /// String table versions are often the comma-separated form of the fixed-file-info quad
+    /// ("10, 0, 0, 1290"), which is not a valid version. That quad already holds the dotted form.
+    fn dotted<'a>(string_version: Option<&'a String>, fixed_version: &'a str) -> Option<&'a str> {
+        match string_version {
+            Some(version) if version.contains(',') => Some(fixed_version),
+            version => version.map(String::as_str),
+        }
     }
 }
 
@@ -73,7 +86,9 @@ fn string_file_info_from_entries<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::string_file_info_from_entries;
+    use rstest::rstest;
+
+    use super::{PeFixedFileInfo, PeInfo, string_file_info_from_entries};
 
     #[test]
     fn empty_string_file_info_values_are_omitted() {
@@ -90,5 +105,34 @@ mod tests {
         );
         assert!(!string_file_info.contains_key("ProductName"));
         assert!(!string_file_info.contains_key("CompanyName"));
+    }
+
+    fn pe_info(string_product_version: &str) -> PeInfo {
+        PeInfo {
+            fixed_file_info: PeFixedFileInfo {
+                file_version: "10.0.0.1290".to_owned(),
+                product_version: "10.0.0.1290".to_owned(),
+                file_os: 4,
+                file_type: 1,
+                file_subtype: 0,
+            },
+            string_file_info: string_file_info_from_entries([(
+                "ProductVersion",
+                string_product_version,
+            )]),
+        }
+    }
+
+    #[rstest]
+    #[case::comma_separated("10, 0, 0, 1290", Some("10.0.0.1290"))]
+    #[case::comma_separated_without_spaces("10,0,0,1290", Some("10.0.0.1290"))]
+    #[case::dot_separated("10.0.0.1290", Some("10.0.0.1290"))]
+    #[case::not_a_quad("2026 R1", Some("2026 R1"))]
+    #[case::absent("", None)]
+    fn comma_separated_versions_come_from_fixed_file_info(
+        #[case] string_product_version: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(pe_info(string_product_version).product_version(), expected);
     }
 }
