@@ -36,6 +36,9 @@ jobs:
 
     environment: Release
 
+    permissions:
+      contents: read # Read this repo's releases to determine the next version
+
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -49,9 +52,14 @@ jobs:
         id: version
         env:
           VERSION_BUMP: ${{ inputs.version-bump }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           package_name="$(jq -r .name package.json)"
-          current_version="$(npm view "${package_name}" version 2>/dev/null || jq -r .version package.json)"
+          # This fork cannot publish to the upstream npm scope, so npm's version never
+          # advances and every run would recompute the same one. Use our own releases.
+          current_version="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')"
+          [[ -n "${current_version}" ]] || current_version="$(jq -r .version package.json)"
           IFS=. read -r major minor patch <<< "${current_version}"
 
           case "${VERSION_BUMP}" in
@@ -380,6 +388,9 @@ jobs:
       - name: List Packages
         run: ls -R ./npm
 
+      # Trusted Publishing for the upstream scope is bound to unpn-org/Komac, so this
+      # fork gets ENEEDAUTH. The GitHub release assets are what anthelion consumes.
       - name: Publish to npm
+        continue-on-error: true
         run: |
           npm publish --provenance --access public
