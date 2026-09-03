@@ -31,34 +31,6 @@ impl Downloads {
     }
 
     pub async fn analyze(&mut self) -> Result<HashMap<DecodedUrl, Analyzer<'_, impl Read + Seek>>> {
-        stream::iter(self.0.iter_mut().map(
-            |DownloadedFile {
-                 file,
-                 download,
-                 sha_256,
-                 last_modified,
-                 ..
-             }| async move {
-                let mut file_analyzer = Analyzer::new(file, &download.file_name)?;
-                let architecture = download
-                    .url()
-                let mut file_analyzer = Analyzer::new(file, file_name, FontAnalysis::None)?;
-                let architecture = url
-                    .override_architecture()
-                    .or_else(|| Architecture::from_url(download.url().as_str()));
-                for installer in &mut file_analyzer.installers {
-                    if let Some(architecture) = architecture {
-                        installer.architecture = architecture;
-                    }
-                    debug!("{download}: {architecture:?}");
-                    installer.url = download.url().inner().clone();
-                    installer.sha_256 = sha_256.clone();
-                    installer.release_date = *last_modified;
-                }
-                file_analyzer.file_name = mem::take(&mut download.file_name);
-                Ok((mem::take(download.url_mut().inner_mut()), file_analyzer))
-            },
-        ))
         stream::iter(self.0.iter_mut().map(|downloaded_file| async move {
             let architecture = downloaded_file.architecture();
             let DownloadedFile {
