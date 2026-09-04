@@ -1,5 +1,5 @@
 pub mod bundle;
-mod utils;
+pub(crate) mod utils;
 
 use std::{
     collections::BTreeSet,

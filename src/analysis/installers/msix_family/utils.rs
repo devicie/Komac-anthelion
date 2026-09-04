@@ -17,9 +17,16 @@ pub fn read_manifest<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &str) -> Res
     Ok(appx_manifest)
 }
 
-pub fn hash_signature<R: Read + Seek>(zip: &mut ZipArchive<R>) -> io::Result<Sha256String> {
-    const APPX_SIGNATURE_P7X: &str = "AppxSignature.p7x";
+const APPX_SIGNATURE_P7X: &str = "AppxSignature.p7x";
 
+/// Whether the package carries the signature Windows requires to install it as an MSIX.
+pub fn is_signed<R: Read + Seek>(reader: R) -> Result<bool> {
+    Ok(ZipArchive::new(reader)?
+        .index_for_name(APPX_SIGNATURE_P7X)
+        .is_some())
+}
+
+pub fn hash_signature<R: Read + Seek>(zip: &mut ZipArchive<R>) -> io::Result<Sha256String> {
     let signature_file = zip.by_name(APPX_SIGNATURE_P7X)?;
     Sha256String::hash_from_reader(signature_file)
 }

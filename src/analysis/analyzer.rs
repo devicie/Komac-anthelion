@@ -17,7 +17,7 @@ use crate::analysis::{
     installers::{
         Exe, Font, Msi, Zip,
         font::FontAnalysis,
-        msix_family::{Msix, bundle::MsixBundle},
+        msix_family::{Msix, bundle::MsixBundle, utils::is_signed},
     },
 };
 
@@ -47,13 +47,14 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
 
         let installers = match extension {
             ValidFileExtensions::Msi => Msi::new(reader)?.installers(),
-            ValidFileExtensions::Msix | ValidFileExtensions::Appx => {
+            // Windows cannot install an unsigned package as an MSIX, so WinGet manifests carry
+            // those as a zip with a portable payload, which is what zip analysis produces.
+            ValidFileExtensions::Msix | ValidFileExtensions::Appx if is_signed(&mut *reader)? => {
+                reader.rewind()?;
                 Msix::new(reader)?.installers()
             }
-            ValidFileExtensions::MsixBundle | ValidFileExtensions::AppxBundle => {
-                MsixBundle::new(reader)?.installers()
-            }
-            ValidFileExtensions::Zip => {
+            ValidFileExtensions::Zip | ValidFileExtensions::Msix | ValidFileExtensions::Appx => {
+                reader.rewind()?;
                 let mut scoped_zip = Zip::new(reader, font_analysis)?;
                 let installers = mem::take(&mut scoped_zip.installers);
                 return Ok(Self {
@@ -61,6 +62,9 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                     zip: Some(scoped_zip),
                     ..Self::default()
                 });
+            }
+            ValidFileExtensions::MsixBundle | ValidFileExtensions::AppxBundle => {
+                MsixBundle::new(reader)?.installers()
             }
             ValidFileExtensions::Exe => {
                 let mut exe = Exe::new(reader)?;
