@@ -1,4 +1,5 @@
 mod analyzer;
+pub mod extensions;
 mod font_info;
 pub mod installers;
 mod pe_info;
