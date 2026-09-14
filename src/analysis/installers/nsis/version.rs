@@ -36,6 +36,17 @@ impl NsisVersion {
         Self::new(2, 0)
     }
 
+    /// Creates a new NSIS version from Jim Park's Unicode fork of NSIS 2.
+    #[cfg(test)]
+    #[inline]
+    pub const fn park(major: u8, minor: u8) -> Self {
+        Self {
+            major,
+            minor,
+            park: true,
+        }
+    }
+
     #[inline]
     pub const fn is_v3(self) -> bool {
         self.major >= 3
