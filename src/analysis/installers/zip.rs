@@ -21,8 +21,7 @@ use winget_types::{
 };
 use zip::ZipArchive;
 
-use super::super::Analyzer;
-use super::font::FontAnalysis;
+use super::{super::Analyzer, font::FontAnalysis};
 #[cfg(feature = "cli")]
 use crate::prompts::handle_inquire_error;
 use crate::traits::path::LowercaseExtension;

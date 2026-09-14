@@ -98,6 +98,16 @@ impl From<DecodedUrl> for Url {
     }
 }
 
+impl From<url::Url> for Url {
+    fn from(url: url::Url) -> Self {
+        Self {
+            inner: DecodedUrl::from_str(url.as_str()).unwrap(),
+            original_url: url,
+            override_architecture: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

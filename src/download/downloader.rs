@@ -1,16 +1,13 @@
-use std::{fmt, num::NonZeroUsize};
+use std::{fmt, mem, num::NonZeroUsize};
 
-use chrono::DateTime;
+use camino::Utf8Path;
 use color_eyre::{Result, eyre::bail};
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{StreamExt, TryFutureExt, TryStreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use itertools::{Itertools, Position};
 use reqwest::{
     Client,
-    header::{
-        CONTENT_DISPOSITION, CONTENT_TYPE, GetAll, HeaderMap, HeaderValue, LAST_MODIFIED,
-        USER_AGENT,
-    },
+    header::{CONTENT_DISPOSITION, CONTENT_TYPE, GetAll, HeaderMap, HeaderValue, USER_AGENT},
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -21,7 +18,11 @@ use tokio::{
 };
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads, file};
+use super::{Download, DownloadedFile, Downloads, PreDownload, file};
+use crate::{
+    analysis::{extensions::FileExtension, installers::msix_family::app_installer::AppInstaller},
+    manifests::Url,
+};
 
 pub struct Downloader {
     client: Client,
@@ -99,10 +100,9 @@ impl Downloader {
     /// Downloads the files at the given URLs to temporary files.
     ///
     /// A file is deleted when its [`DownloadedFile`] is dropped.
-    pub async fn download<I, D>(&self, downloads: I) -> Result<Downloads>
+    pub async fn download<I>(&self, downloads: I) -> Result<Downloads>
     where
-        I: IntoIterator<Item = D>,
-        D: Into<Download>,
+        I: IntoIterator<Item = Url>,
     {
         let multi_progress = if self.show_progress {
             MultiProgress::new()
@@ -110,8 +110,11 @@ impl Downloader {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
 
-        let downloaded_files = stream::iter(downloads.into_iter().map(D::into).unique())
-            .map(|download| self.fetch(&self.client, download, &multi_progress))
+        let downloaded_files = stream::iter(downloads.into_iter().unique())
+            .map(|url| {
+                self.pre_fetch(&self.client, url)
+                    .and_then(|download| self.fetch(download, &multi_progress))
+            })
             .buffer_unordered(self.concurrent_downloads.get())
             .try_collect::<Downloads>()
             .await?;
@@ -137,7 +140,7 @@ impl Downloader {
     }
 
     fn check_content_types(
-        download: &Download,
+        download: &PreDownload,
         content_types: GetAll<HeaderValue>,
     ) -> Result<(), ContentTypeError> {
         // Some download servers omit Content-Type, so only reject explicitly invalid values.
@@ -160,41 +163,52 @@ impl Downloader {
         Ok(())
     }
 
+    pub async fn pre_fetch(&self, client: &Client, url: Url) -> Result<Download> {
+        let mut pre_download: PreDownload = url.into();
+
+        pre_download.convert_to_github_versioned().await?;
+
+        pre_download.upgrade_to_https(client).await;
+
+        loop {
+            let res = pre_download.send(client).await?;
+
+            if let Err(err) = res.error_for_status_ref() {
+                bail!(
+                    "{} returned {}",
+                    err.url().unwrap().as_str(),
+                    err.status().unwrap()
+                )
+            }
+
+            // Check that we're downloading an application
+            Self::check_content_types(&pre_download, res.headers().get_all(CONTENT_TYPE))?;
+
+            let file_name = pre_download
+                .file_name(res.url(), res.headers().get(CONTENT_DISPOSITION))
+                .into_owned();
+
+            let file_extension = Utf8Path::new(&file_name)
+                .extension()
+                .and_then(|extension| extension.parse::<FileExtension>().ok());
+
+            if file_extension.is_some_and(FileExtension::is_app_installer) {
+                *pre_download.url_mut() = AppInstaller::fetch_main_url(res).await?.into();
+                continue;
+            }
+
+            return Ok(Download::new(pre_download.into_url(), file_name, res));
+        }
+    }
+
     pub async fn fetch(
         &self,
-        client: &Client,
         mut download: Download,
         multi_progress: &MultiProgress,
     ) -> Result<DownloadedFile> {
-        download.convert_to_github_versioned().await?;
+        let last_modified = download.last_modified();
 
-        download.upgrade_to_https(client).await;
-
-        let res = download.send(client).await?;
-
-        if let Err(err) = res.error_for_status_ref() {
-            bail!(
-                "{} returned {}",
-                err.url().unwrap().as_str(),
-                err.status().unwrap()
-            );
-        }
-
-        // Check that we're downloading an application
-        Self::check_content_types(&download, res.headers().get_all(CONTENT_TYPE))?;
-
-        let file_name = download
-            .file_name(res.url(), res.headers().get(CONTENT_DISPOSITION))
-            .into_owned();
-
-        let last_modified = res
-            .headers()
-            .get(LAST_MODIFIED)
-            .and_then(|last_modified| last_modified.to_str().ok())
-            .and_then(|last_modified| DateTime::parse_from_rfc2822(last_modified).ok())
-            .map(|date_time| date_time.date_naive());
-
-        let progress_bar = match res.content_length() {
+        let progress_bar = match download.content_length() {
             Some(len) => ProgressBar::new(len).with_style(
                 ProgressStyle::with_template(Self::PROGRESS_TEMPLATE)?
                     .progress_chars(Self::PROGRESS_CHARS),
@@ -233,7 +247,7 @@ impl Downloader {
             hasher.finalize()
         });
 
-        let mut stream = res.bytes_stream();
+        let mut stream = download.response.take().unwrap().bytes_stream();
 
         // Download the chunks asynchronously
         while let Some(chunk) = stream.next().await.transpose()? {
@@ -253,10 +267,12 @@ impl Downloader {
 
         progress.finish();
 
+        let file_name = file::infer_extension(mem::take(&mut download.file_name), &temp_file)?;
+
         Ok(DownloadedFile {
             url: download.into_url(),
             sha_256: Sha256String::from_digest(&sha_256),
-            file_name: file::infer_extension(file_name, &temp_file)?,
+            file_name,
             file: temp_file,
             last_modified,
         })
@@ -265,14 +281,14 @@ impl Downloader {
 
 #[derive(Debug, Error)]
 pub struct ContentTypeError {
-    download: Download,
+    download: PreDownload,
     content_types: Vec<HeaderValue>,
 }
 
 impl ContentTypeError {
     pub fn new<D, I, C>(download: D, content_types: I) -> Self
     where
-        D: Into<Download>,
+        D: Into<PreDownload>,
         I: IntoIterator<Item = C>,
         C: Into<HeaderValue>,
     {
@@ -315,7 +331,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::manifests::Url;
 
     #[rstest]
     #[case::missing(&[], true)]
@@ -326,14 +341,15 @@ mod tests {
     #[case::non_application(&["text/html"], false)]
     #[case::one_valid(&["text/html", "application/octet-stream"], true)]
     fn checks_content_types(#[case] content_types: &[&str], #[case] expected: bool) {
-        let download = Download::new("https://example.com/installer.exe".parse::<Url>().unwrap());
+        let pre_download =
+            PreDownload::new("https://example.com/installer.exe".parse::<Url>().unwrap());
         let mut headers = HeaderMap::new();
         for content_type in content_types {
             headers.append(CONTENT_TYPE, content_type.parse().unwrap());
         }
 
         assert_eq!(
-            Downloader::check_content_types(&download, headers.get_all(CONTENT_TYPE)).is_ok(),
+            Downloader::check_content_types(&pre_download, headers.get_all(CONTENT_TYPE)).is_ok(),
             expected
         );
     }

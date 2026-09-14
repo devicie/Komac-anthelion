@@ -145,10 +145,6 @@ impl<'data> NsisState<'data> {
             Either::Right(string_bytes)
         };
 
-        if self.is_park() {
-            todo!("NSIS Park support");
-        }
-
         // Check whether the string contains any special characters that need to be decoded
         let contains_code = match string_chars {
             Either::Left(chars) => chars
@@ -189,7 +185,12 @@ impl<'data> NsisState<'data> {
                     if code.is_shell() {
                         Shell::resolve(&mut buf, self, special_char);
                     } else {
-                        let index = usize::from(decode_number_from_char(special_char));
+                        let index = usize::from(if self.is_park() {
+                            // Park encodes the number in the low 15 bits of one character
+                            special_char & PARK_NUMBER_MASK
+                        } else {
+                            decode_number_from_char(special_char)
+                        });
                         if code.is_var() {
                             NsVar::resolve(&mut buf, index, &self.variables, self.version);
                         } else if code.is_lang()
@@ -281,6 +282,9 @@ impl<'data> NsisState<'data> {
         }
     }
 }
+
+/// The bits of a Park character that hold a variable or language string index.
+const PARK_NUMBER_MASK: u16 = 0x7FFF;
 
 const fn decode_number_from_char(mut char: u16) -> u16 {
     const ASCII_MASK: u16 = u16::from_le_bytes([u8::MAX >> 1; size_of::<u16>()]);

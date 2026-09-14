@@ -24,7 +24,7 @@ use msi::Language;
 use registry::Registry;
 use state::NsisState;
 use strsim::levenshtein;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use typed_path::{Utf8Component, Utf8WindowsPath, Utf8WindowsPathBuf};
 use variables::Variables;
 use winget_types::{
@@ -56,6 +56,65 @@ use crate::{
 const APP_32: &str = "app-32";
 const APP_64: &str = "app-64";
 
+/// NSIS writes its first header on a 512-byte boundary.
+const FIRST_HEADER_ALIGNMENT: u64 = 512;
+
+/// How far past the PE overlay to look for the first header.
+///
+/// The first header does not always begin exactly at the overlay: a tool that edits an installer's
+/// resources can grow a section without fixing up the section table, leaving the section headers
+/// describing less data than the file actually holds. NSIS's own exehead copes with this by
+/// scanning its file in 512-byte steps for the first header, so scan too, but only far enough to
+/// cover a misplaced section rather than reading through every non-NSIS executable in full.
+const FIRST_HEADER_SEARCH_LIMIT: u64 = 1 << 20;
+
+/// How far the end of an installer's data may fall short of `data_end` and still be its data.
+///
+/// An Authenticode signature is aligned to 8 bytes, so a signed installer's data can be followed by
+/// up to 7 bytes of padding.
+const DATA_END_TOLERANCE: u64 = 8;
+
+/// Finds the NSIS first header at or after the PE overlay offset.
+///
+/// `data_end` is where the installer's data has to end: the start of the certificate table for a
+/// signed installer, and the end of the file otherwise.
+fn find_first_header<R: Read + Seek>(
+    mut reader: R,
+    overlay_offset: u64,
+    data_end: u64,
+) -> io::Result<Option<(u64, FirstHeader)>> {
+    /// Returns `true` if the header describes data that ends where the installer's data ends.
+    fn describes_data_to_end(offset: u64, first_header: &FirstHeader, data_end: u64) -> bool {
+        let end = offset + u64::from(first_header.length_of_following_data());
+
+        end <= data_end && data_end - end < DATA_END_TOLERANCE
+    }
+
+    let start = overlay_offset.next_multiple_of(FIRST_HEADER_ALIGNMENT);
+
+    reader.seek(SeekFrom::Start(start))?;
+
+    let mut offset = start;
+    while offset - start <= FIRST_HEADER_SEARCH_LIMIT {
+        match FirstHeader::try_read_from_io(&mut reader) {
+            // The overlay is where the first header belongs, so take it there without question
+            Ok(first_header) if offset == start => return Ok(Some((offset, first_header))),
+            // Further in, the signature alone could be a payload rather than this installer's own
+            // data, so only take a header that accounts for the rest of the file
+            Ok(first_header) if describes_data_to_end(offset, &first_header, data_end) => {
+                return Ok(Some((offset, first_header)));
+            }
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(_) | Err(_) => {}
+        }
+
+        offset += FIRST_HEADER_ALIGNMENT;
+        reader.seek(SeekFrom::Start(offset))?;
+    }
+
+    Ok(None)
+}
+
 pub struct Nsis {
     pub architecture: Architecture,
     pub is_portable: bool,
@@ -67,20 +126,26 @@ pub struct Nsis {
 impl Nsis {
     pub fn new<R: Read + Seek>(mut reader: R, pe: &PE) -> Result<Self, NsisError> {
         // Get the PE overlay offset
-        let first_header_offset = pe.overlay_offset().ok_or(NsisError::NotNsisFile)?;
+        let overlay_offset = pe.overlay_offset().ok_or(NsisError::NotNsisFile)?;
 
         let manifest = pe.manifest(&mut reader).ok();
 
-        // Seek to the first header
-        reader
-            .seek(SeekFrom::Start(first_header_offset))
-            .map_err(|_| NsisError::NotNsisFile)?;
+        // The installer's data ends where its signature begins, or at the end of the file
+        let data_end = pe.certificate_table().map_or_else(
+            || reader.seek(SeekFrom::End(0)).unwrap_or(u64::MAX),
+            |certificate_table| u64::from(certificate_table.virtual_address()),
+        );
 
-        // Read the first header
-        let first_header =
-            FirstHeader::try_read_from_io(&mut reader).map_err(|_| NsisError::NotNsisFile)?;
+        // Find and read the first header at or after the overlay
+        let (first_header_offset, first_header) =
+            find_first_header(&mut reader, overlay_offset, data_end)
+                .map_err(|_| NsisError::NotNsisFile)?
+                .ok_or(NsisError::NotNsisFile)?;
 
         let data_offset = first_header_offset + size_of::<FirstHeader>() as u64;
+
+        // `Header::decompress` reads from the reader's current position
+        reader.seek(SeekFrom::Start(data_offset))?;
 
         debug!(first_header_offset, ?first_header, data_offset);
 
@@ -100,32 +165,40 @@ impl Nsis {
 
         let mut state = NsisState::new(&decompressed_data, &header, manifest.as_deref())?;
 
-        // https://nsis.sourceforge.io/Reference/.onInit
-        if header.code_on_init() != -1 {
-            debug!("Simulating code execution for .onInit callback");
-            if let Err(invalid_entry) = state.execute_code_segment(header.code_on_init()) {
-                error!(%invalid_entry);
+        // Jim Park's Unicode fork of NSIS 2 adds instructions in the middle of the opcode list, so
+        // its entries mean something different to the same opcodes in NSIS 2 and 3. Executing them
+        // as if they were NSIS 2 entries would invent registry values and install locations, so the
+        // installer is identified as NSIS without anything that simulating its code would give.
+        if state.is_park() {
+            warn!("Not simulating code execution: NSIS Park installers are not supported");
+        } else {
+            // https://nsis.sourceforge.io/Reference/.onInit
+            if header.code_on_init() != -1 {
+                debug!("Simulating code execution for .onInit callback");
+                if let Err(invalid_entry) = state.execute_code_segment(header.code_on_init()) {
+                    error!(%invalid_entry);
+                }
             }
-        }
 
-        for (index, section) in header.blocks().sections(&decompressed_data).enumerate() {
-            debug!(
-                r#"Simulating code execution for section {index} "{}""#,
-                state.get_string(section.name_offset())
-            );
-            match state.execute_code_segment(section.code_offset()) {
-                Ok(Entry::Quit) => break,
-                Err(invalid_entry) => error!(%invalid_entry),
-                _ => {}
+            for (index, section) in header.blocks().sections(&decompressed_data).enumerate() {
+                debug!(
+                    r#"Simulating code execution for section {index} "{}""#,
+                    state.get_string(section.name_offset())
+                );
+                match state.execute_code_segment(section.code_offset()) {
+                    Ok(Entry::Quit) => break,
+                    Err(invalid_entry) => error!(%invalid_entry),
+                    _ => {}
+                }
             }
-        }
 
-        // https://nsis.sourceforge.io/Reference/.onInstSuccess
-        if header.code_on_inst_success() != -1 {
-            debug!("Simulating code execution for .onInstSuccess callback");
-            match state.execute_code_segment(header.code_on_inst_success()) {
-                Err(EntryError::Abort { .. }) | Ok(..) => {}
-                Err(invalid_entry) => error!(%invalid_entry),
+            // https://nsis.sourceforge.io/Reference/.onInstSuccess
+            if header.code_on_inst_success() != -1 {
+                debug!("Simulating code execution for .onInstSuccess callback");
+                match state.execute_code_segment(header.code_on_inst_success()) {
+                    Err(EntryError::Abort { .. }) | Ok(..) => {}
+                    Err(invalid_entry) => error!(%invalid_entry),
+                }
             }
         }
 
@@ -239,14 +312,22 @@ impl Nsis {
                     })
             });
 
+        // Without simulating a Park installer's code, the install directory in its header is
+        // whatever the compiler left there rather than where the installer actually installs
+        let install_directory = (!state.is_park())
+            .then(|| {
+                state
+                    .variables
+                    .install_dir()
+                    .map(Utf8WindowsPath::to_path_buf)
+            })
+            .flatten();
+
         Ok(Self {
             architecture: architecture.unwrap_or(Architecture::X86),
             is_portable: state.is_portable(),
             registry: state.registry,
-            install_directory: state
-                .variables
-                .install_dir()
-                .map(Utf8WindowsPath::to_path_buf),
+            install_directory,
             primary_language_id: state.language_table.id(),
         })
     }
@@ -326,11 +407,90 @@ impl Installers for Nsis {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use registry::RegRoot;
 
     use super::*;
 
     const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Test.App";
+
+    const OVERLAY_OFFSET: u64 = 2 * FIRST_HEADER_ALIGNMENT;
+
+    const SIGNATURE: &[u8; 16] = b"\xEF\xBE\xAD\xDENullsoftInst";
+
+    /// Builds a file whose first header is `header_offset` bytes in and claims `length_of_data`
+    /// bytes of following data.
+    fn file_with_first_header(header_offset: u64, length_of_data: u32, len: usize) -> Vec<u8> {
+        let mut data = vec![0; len];
+        let offset = header_offset as usize;
+
+        data[offset..offset + 0x04].copy_from_slice(&0u32.to_le_bytes()); // flags
+        data[offset + 0x04..offset + 0x14].copy_from_slice(SIGNATURE);
+        data[offset + 0x14..offset + 0x18].copy_from_slice(&1u32.to_le_bytes()); // header length
+        data[offset + 0x18..offset + 0x1C].copy_from_slice(&length_of_data.to_le_bytes());
+
+        data
+    }
+
+    #[test]
+    fn finds_first_header_at_the_overlay() {
+        const LENGTH_OF_DATA: u32 = 64;
+
+        let data = file_with_first_header(OVERLAY_OFFSET, LENGTH_OF_DATA, 4096);
+        let data_end = data.len() as u64;
+
+        let (offset, first_header) = find_first_header(Cursor::new(data), OVERLAY_OFFSET, data_end)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(offset, OVERLAY_OFFSET);
+        assert_eq!(first_header.length_of_following_data(), LENGTH_OF_DATA);
+    }
+
+    #[test]
+    fn finds_first_header_past_the_overlay() {
+        // A section that a resource editor moved without fixing up the section table leaves the
+        // overlay offset short of the data
+        const HEADER_OFFSET: u64 = OVERLAY_OFFSET + 4096;
+        const LEN: usize = 8192;
+
+        let data = file_with_first_header(HEADER_OFFSET, (LEN as u64 - HEADER_OFFSET) as u32, LEN);
+
+        let (offset, _) = find_first_header(Cursor::new(data), OVERLAY_OFFSET, LEN as u64)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(offset, HEADER_OFFSET);
+    }
+
+    #[test]
+    fn ignores_first_header_past_the_overlay_that_is_not_the_installer_data() {
+        // An NSIS installer carried as a payload has a first header of its own that does not
+        // account for the rest of the file
+        const HEADER_OFFSET: u64 = OVERLAY_OFFSET + 4096;
+        const LEN: usize = 8192;
+
+        let data = file_with_first_header(HEADER_OFFSET, 64, LEN);
+
+        assert!(
+            find_first_header(Cursor::new(data), OVERLAY_OFFSET, LEN as u64)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn does_not_find_a_first_header_without_a_signature() {
+        let data = vec![0; 8192];
+        let len = data.len() as u64;
+
+        assert!(
+            find_first_header(Cursor::new(data), OVERLAY_OFFSET, len)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn nsis_with_scope_signals(root: RegRoot, install_directory: &str) -> Nsis {
         let mut registry = Registry::new();
