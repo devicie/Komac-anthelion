@@ -11,12 +11,6 @@ use winget_types::{
     utils::ValidFileExtensions,
 };
 
-use super::extensions::FileExtension;
-use super::{
-    PeInfo,
-    extensions::{APPX, APPX_BUNDLE, EXE, MSI, MSIX, MSIX_BUNDLE, ZIP},
-};
-use super::PeInfo;
 use super::{FontInfo, PeInfo};
 use crate::analysis::{
     Installers,
@@ -44,18 +38,6 @@ pub struct Analyzer<'reader, R: Read + Seek> {
 }
 
 impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
-    pub fn new(reader: &'reader mut R, file_name: &str) -> Result<Self> {
-        let installers = match Utf8Path::new(file_name)
-            .extension()
-            .unwrap_or_default()
-            .parse()?
-        {
-            FileExtension::Msi => Msi::new(reader)?.installers(),
-            FileExtension::Msix | FileExtension::Appx => Msix::new(reader)?.installers(),
-            FileExtension::MsixBundle | FileExtension::AppxBundle => {
-                MsixBundle::new(reader)?.installers()
-            }
-            FileExtension::Zip => {
     pub(crate) fn new(
         reader: &'reader mut R,
         file_name: &str,
@@ -80,7 +62,6 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                     ..Self::default()
                 });
             }
-            FileExtension::Exe => {
             ValidFileExtensions::Exe => {
                 let mut exe = Exe::new(reader)?;
                 let mut installers = exe.installers();
@@ -105,12 +86,6 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                     ..Self::default()
                 });
             }
-            FileExtension::AppInstaller => {
-                // AppInstaller files will only reach this point from the analyze command as they
-                // are converted to an MSIX or MSIXBundle before downloading
-                bail!(".appinstaller files are not supported for the analyze command")
-            }
-            _ => unreachable!(),
             ValidFileExtensions::Fnt
             | ValidFileExtensions::Otc
             | ValidFileExtensions::Otf

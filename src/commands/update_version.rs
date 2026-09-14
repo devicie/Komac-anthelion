@@ -167,13 +167,6 @@ impl UpdateVersion {
             .flat_map(Analyzer::into_installers)
             .collect();
 
-        manifests.installer
-            .installers
-            .iter_mut()
-            .flat_map(|installer| &mut installer.apps_and_features_entries)
-            .for_each(|entry| entry.deduplicate(&manifests.default_locale));
-
-        manifests.installer.optimize();
         manifests.installer.locale = None;
         manifests
             .installer
@@ -185,6 +178,14 @@ impl UpdateVersion {
             .into_iter()
             .flatten()
             .for_each(|installer| installer.locale = None);
+        manifests
+            .installer
+            .installers
+            .iter_mut()
+            .flat_map(|installer| &mut installer.apps_and_features_entries)
+            .for_each(|entry| entry.deduplicate(&manifests.default_locale));
+
+        manifests.installer.optimize();
 
         manifests.update(
             &self.version,

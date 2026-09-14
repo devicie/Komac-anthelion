@@ -221,7 +221,6 @@ impl Msi {
             .tag()
             .parse::<LanguageTag>()
             .ok()
-            .filter(|language_tag| language_tag != &langid!("und"))
             .filter(|language_tag| language_tag != &LanguageTag::new(langid!("und")))
     }
 
