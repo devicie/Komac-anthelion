@@ -41,6 +41,10 @@ impl Downloader {
 
     const TEXT_PLAIN: &'static str = "text/plain";
 
+    /// The IANA top-level type for fonts: `font/otf`, `font/ttf`, `font/collection` (`.ttc` and
+    /// `.otc`), `font/sfnt`, etc.
+    const FONT: &'static str = "font/";
+
     /// Creates a new Downloader with a maximum number of concurrent downloads of the number of
     /// logical cores the system has.
     ///
@@ -152,6 +156,7 @@ impl Downloader {
                     && !content_type
                         .as_bytes()
                         .starts_with(Self::TEXT_PLAIN.as_bytes())
+                    && !content_type.as_bytes().starts_with(Self::FONT.as_bytes())
             })
         {
             return Err(ContentTypeError::new(download.clone(), content_types));
@@ -337,6 +342,10 @@ mod tests {
     #[case::binary_octet_stream(&["binary/octet-stream"], true)]
     #[case::text_plain(&["text/plain"], true)]
     #[case::text_plain_with_charset(&["text/plain; charset=UTF-8"], true)]
+    #[case::font_otf(&["font/otf"], true)]
+    #[case::font_ttf(&["font/ttf"], true)]
+    #[case::font_collection(&["font/collection"], true)]
+    #[case::font_sfnt(&["font/sfnt"], true)]
     #[case::non_application(&["text/html"], false)]
     #[case::one_valid(&["text/html", "application/octet-stream"], true)]
     fn checks_content_types(#[case] content_types: &[&str], #[case] expected: bool) {
