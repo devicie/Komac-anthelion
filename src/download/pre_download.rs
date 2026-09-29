@@ -3,7 +3,11 @@ use std::{borrow::Cow, fmt};
 use camino::Utf8Path;
 use color_eyre::Result;
 use const_format::formatcp;
-use reqwest::{Client, ClientBuilder, Response, header::HeaderValue, redirect::Policy};
+use reqwest::{
+    Client, ClientBuilder, Response,
+    header::{HeaderValue, USER_AGENT},
+    redirect::Policy,
+};
 use uuid::Uuid;
 use winget_types::utils::ValidFileExtensions;
 
@@ -45,15 +49,43 @@ impl PreDownload {
             .is_ok_and(|response| response.status().is_success())
     }
 
+    /// The user agent winget-cli itself sends, used when a server rejects the
+    /// Delivery Optimization user agent.
+    ///
+    /// See <https://github.com/microsoft/winget-cli/blob/8d070bb1d2c0e1b1aa45be548e9326c64b7604e9/src/AppInstallerCommonCore/Runtime.cpp#L561-L583>
+    const WINGET_USER_AGENT: HeaderValue = HeaderValue::from_static(
+        "winget-cli WindowsPackageManager/1.11.400 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.26.400.0",
+    );
+
+    /// Sends a GET request with the client's default user agent, retrying with winget-cli's user
+    /// agent if that does not succeed.
+    async fn get(client: &Client, url: url::Url) -> reqwest::Result<Response> {
+        let response = client.get(url.clone()).send().await;
+        if Self::is_successful(&response) {
+            return response;
+        }
+
+        let fallback = client
+            .get(url)
+            .header(USER_AGENT, Self::WINGET_USER_AGENT)
+            .send()
+            .await;
+        if Self::is_successful(&fallback) || response.is_err() {
+            fallback
+        } else {
+            response
+        }
+    }
+
     pub(super) async fn send(&mut self, client: &Client) -> reqwest::Result<Response> {
         let url = (**self.0).clone();
-        let response = client.get(url.clone()).send().await;
+        let response = Self::get(client, url.clone()).await;
 
         if url == *self.0.original_url() || Self::is_successful(&response) {
             return response;
         }
 
-        let response = client.get(self.0.original_url().clone()).send().await;
+        let response = Self::get(client, self.0.original_url().clone()).await;
         if Self::is_successful(&response) {
             self.0.use_original_url();
         }
