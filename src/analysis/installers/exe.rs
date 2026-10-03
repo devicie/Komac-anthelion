@@ -4,13 +4,16 @@ use color_eyre::Result;
 use inno::{Inno, InnoInner, error::InnoError};
 use winget_types::installer::{Installer, InstallerType};
 
-use super::{super::Installers, AdvancedInstaller, Burn, InstallShield, Nsis, Squirrel};
+use super::{
+    super::Installers, AdvancedInstaller, Burn, InstallAware, InstallShield, Nsis, Squirrel,
+};
 use crate::{
     analysis::{
         PeInfo,
         installers::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
+            installaware::InstallAwareError,
             installshield::InstallShieldError,
             nsis::NsisError,
             pe::{PE, VSVersionInfo},
@@ -38,6 +41,7 @@ pub enum ExeType {
     AdvancedInstaller(AdvancedInstaller),
     Burn(Box<Burn>),
     Inno(Box<InnoInner>),
+    InstallAware(InstallAware),
     InstallShield(Box<InstallShield>),
     Nsis(Nsis),
     Squirrel(Squirrel),
@@ -120,6 +124,22 @@ impl Exe {
                 });
             }
             Err(InnoError::NotInnoFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match InstallAware::new(&mut reader, &pe) {
+            Ok(installaware) => {
+                return Ok(Self {
+                    r#type: ExeType::InstallAware(installaware),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(InstallAwareError::NotInstallAwareFile) => {}
             Err(error) => return Err(error.into()),
         }
 
@@ -206,6 +226,7 @@ impl Installers for Exe {
             ExeType::AdvancedInstaller(advanced) => advanced.installers(),
             ExeType::Burn(burn) => burn.installers(),
             ExeType::Inno(inno) => inno.installers(),
+            ExeType::InstallAware(installaware) => installaware.installers(),
             ExeType::InstallShield(installshield) => installshield.installers(),
             ExeType::Nsis(nsis) => nsis.installers(),
             ExeType::Squirrel(squirrel) => squirrel.installers(),
