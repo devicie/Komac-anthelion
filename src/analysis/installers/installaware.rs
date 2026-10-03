@@ -1,6 +1,5 @@
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 
-use memchr::memmem;
 use sevenz_rust2::{ArchiveReader, Password};
 use thiserror::Error;
 use tracing::debug;
@@ -15,11 +14,13 @@ use crate::analysis::Installers;
 /// The InstallAware runtime library that is packed alongside every InstallAware setup.
 const MIA_LIB: &str = "mia.lib";
 
-const SEVEN_Z_SIGNATURE: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+/// The 7z SFX config that precedes the 7z archive in the overlay is delimited by these lines.
+///
+/// See <https://github.com/ip7z/7zip/blob/main/DOC/installer.txt>.
+const SFX_CONFIG_START: &[u8] = b";!@Install@!UTF-8!";
+const SFX_CONFIG_END: &[u8] = b";!@InstallEnd@!";
 
-/// The maximum number of bytes into the overlay to search for the 7z archive, allowing for the
-/// 7z SFX config (`;!@Install@!UTF-8! ... ;!@InstallEnd@!`) that precedes it.
-const MAX_ARCHIVE_SEARCH: u64 = 1 << 12;
+const MAX_SFX_CONFIG_SIZE: u64 = 1 << 16;
 
 #[derive(Error, Debug)]
 pub enum InstallAwareError {
@@ -42,17 +43,23 @@ impl InstallAware {
             .ok_or(InstallAwareError::NotInstallAwareFile)?;
 
         reader.seek(SeekFrom::Start(overlay_offset))?;
-        let mut header = Vec::new();
-        reader
-            .by_ref()
-            .take(MAX_ARCHIVE_SEARCH)
-            .read_to_end(&mut header)?;
-
-        let archive_offset = memmem::find(&header, &SEVEN_Z_SIGNATURE)
-            .ok_or(InstallAwareError::NotInstallAwareFile)?;
+        let mut sfx_config = BufReader::new(reader.by_ref().take(MAX_SFX_CONFIG_SIZE));
+        let mut sfx_config_size = 0;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = sfx_config.read_until(b'\n', &mut line)?;
+            if read == 0 || (sfx_config_size == 0 && !line.starts_with(SFX_CONFIG_START)) {
+                return Err(InstallAwareError::NotInstallAwareFile);
+            }
+            sfx_config_size += read as u64;
+            if line.trim_ascii_end() == SFX_CONFIG_END {
+                break;
+            }
+        }
 
         let mut archive = ArchiveReader::new(
-            SectionReader::from_offset(&mut reader, overlay_offset + archive_offset as u64)?,
+            SectionReader::from_offset(&mut reader, overlay_offset + sfx_config_size)?,
             Password::empty(),
         )
         .map_err(|_| InstallAwareError::NotInstallAwareFile)?;
