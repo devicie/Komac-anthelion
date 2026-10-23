@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io,
     io::{Read, Seek},
 };
@@ -10,6 +11,7 @@ use indexmap::{
 };
 use msi::{Package, Select};
 
+use super::property_table::PropertyTable;
 use crate::analysis::installers::utils::{
     RELATIVE_APP_DATA, RELATIVE_COMMON_FILES_32, RELATIVE_COMMON_FILES_64, RELATIVE_LOCAL_APP_DATA,
     RELATIVE_PROGRAM_FILES_32, RELATIVE_PROGRAM_FILES_64, RELATIVE_TEMP_FOLDER,
@@ -69,7 +71,10 @@ use crate::analysis::installers::utils::{
 pub struct DirectoryTable(IndexMap<String, (Option<String>, String)>);
 
 impl DirectoryTable {
-    pub fn new<R: Read + Seek>(msi: &mut Package<R>) -> io::Result<Self> {
+    pub fn new<R: Read + Seek>(
+        msi: &mut Package<R>,
+        property_table: &PropertyTable,
+    ) -> io::Result<Self> {
         const DIRECTORY: &str = "Directory";
         const DIRECTORY_PARENT: &str = "Directory_Parent";
         const DEFAULT_DIR: &str = "DefaultDir";
@@ -88,7 +93,10 @@ impl DirectoryTable {
                     ) {
                         (Some(directory), parent, Some(default)) => Some((
                             directory.to_owned(),
-                            (parent.map(str::to_owned), default.to_owned()),
+                            (
+                                parent.map(str::to_owned),
+                                expand_properties(default, property_table).into_owned(),
+                            ),
                         )),
                         _ => None,
                     }
@@ -147,6 +155,27 @@ impl<'a> IntoIterator for &'a DirectoryTable {
     }
 }
 
+/// Expands `[Property]` references in a directory name, such as the `[ApplicationFolderName]` that
+/// WiX's `WixUI_Advanced` names the install directory with.
+fn expand_properties<'a>(default_dir: &'a str, property_table: &PropertyTable) -> Cow<'a, str> {
+    let mut default_dir = Cow::Borrowed(default_dir);
+    let mut offset = 0;
+
+    while let Some(start) = default_dir[offset..].find('[').map(|index| offset + index)
+        && let Some(end) = default_dir[start..].find(']').map(|index| start + index)
+    {
+        offset = match property_table.get(&default_dir[start + 1..end]) {
+            Some(value) => {
+                default_dir.to_mut().replace_range(start..=end, value);
+                start + value.len()
+            }
+            None => end + 1,
+        };
+    }
+
+    default_dir
+}
+
 pub fn get_property_relative_path(property: &str) -> Option<&str> {
     const PROGRAM_FILES_64_FOLDER: &str = "ProgramFiles64Folder";
     const PROGRAM_FILES_FOLDER: &str = "ProgramFilesFolder";
@@ -167,5 +196,26 @@ pub fn get_property_relative_path(property: &str) -> Option<&str> {
         TEMP_FOLDER => Some(RELATIVE_TEMP_FOLDER),
         WINDOWS_FOLDER => Some(RELATIVE_WINDOWS_DIR),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::{PropertyTable, expand_properties};
+
+    #[rstest]
+    #[case::no_reference("MyApp", "MyApp")]
+    #[case::whole_name("[AppName]", "My App")]
+    #[case::within_name("Vendor [AppName] 2", "Vendor My App 2")]
+    #[case::unknown_property("[Unknown]", "[Unknown]")]
+    #[case::unclosed_bracket("[AppName", "[AppName")]
+    #[case::self_reference("[Recursive]", "[Recursive]")]
+    fn expands_property_references(#[case] default_dir: &str, #[case] expected: &str) {
+        let property_table =
+            PropertyTable::from_iter([("AppName", "My App"), ("Recursive", "[Recursive]")]);
+
+        assert_eq!(expand_properties(default_dir, &property_table), expected);
     }
 }
