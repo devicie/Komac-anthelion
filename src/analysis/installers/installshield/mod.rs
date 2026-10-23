@@ -50,6 +50,13 @@ pub enum InstallShieldError {
     Ini(#[from] serini::Error),
 }
 
+/// The setup launcher clones itself to %TEMP% and relaunches, and unless the installer was built
+/// with the default `Clone_wait` setting, the original process exits before the installation
+/// finishes, so WinGet reports success while msiexec is still running.
+///
+/// https://docs.revenera.com/installshield28helplib/helplibrary/Changing_DefaultClone-WaitParameter.htm
+const CLONE_WAIT: &str = "/clone_wait";
+
 #[derive(Debug)]
 pub struct InstallShield {
     pub architecture: Architecture,
@@ -302,11 +309,13 @@ impl Installers for InstallShield {
                     .silent_with_progress("/s /v\"/qb /norestart\"".parse().unwrap())
                     .install_location("/v\"INSTALLDIR=\"\"<INSTALLPATH>\"\"\"".parse().unwrap())
                     .log("/v\"/log \"\"<LOGPATH>\"\"\"".parse().unwrap())
+                    .custom(CLONE_WAIT.parse().unwrap())
                     .build()
             } else {
                 Switches::builder()
                     .silent("/s".parse().unwrap())
                     .silent_with_progress("/s".parse().unwrap())
+                    .custom(CLONE_WAIT.parse().unwrap())
                     .build()
             },
             expected_return_codes: return_codes::expected_return_codes(msi_based),
@@ -493,4 +502,47 @@ fn read_utf16le_strz<R: Read>(reader: &mut R) -> Result<String, std::io::Error> 
         buf.extend_from_slice(&code_unit.to_le_bytes());
     }
     Ok(UTF_16LE.decode(&buf).0.into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use winget_types::installer::Architecture;
+
+    use super::{
+        InstallShield,
+        setup_ini::{Languages, SetupIni, Startup},
+    };
+    use crate::analysis::Installers;
+
+    #[rstest]
+    #[case::basic_msi("0")]
+    #[case::installscript("1")]
+    fn setup_launcher_waits_for_clone(#[case] script_driven: &str) {
+        let installshield = InstallShield {
+            architecture: Architecture::X86,
+            setup_ini: Some(SetupIni {
+                startup: Startup {
+                    cmd_line: String::new(),
+                    script_driven: Some(script_driven.to_owned()),
+                    company_name: None,
+                    package_name: None,
+                    product: None,
+                    product_code: None,
+                    product_version: None,
+                    upgrade_code: None,
+                },
+                languages: Languages {
+                    default: "0x0409".to_owned(),
+                },
+            }),
+            setup_iss: None,
+            setup_xml: None,
+        };
+
+        let installers = installshield.installers();
+        let custom = installers[0].switches.custom().unwrap();
+
+        assert_eq!(custom.to_string(), "/clone_wait");
+    }
 }
