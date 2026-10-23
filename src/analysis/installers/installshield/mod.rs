@@ -55,7 +55,7 @@ pub enum InstallShieldError {
 /// finishes, so WinGet reports success while it is still running. Every project type's launcher
 /// accepts this: InstallScript, Basic MSI, InstallScript MSI and Suite/Advanced UI.
 ///
-/// https://docs.revenera.com/installshield/helplibrary/IHelpSetup_EXECmdLine.htm
+/// https://docs.revenera.com/installshield/helplibrary/Changing_DefaultClone-WaitParameter.htm
 const CLONE_WAIT: &str = "/clone_wait";
 
 #[derive(Debug)]
