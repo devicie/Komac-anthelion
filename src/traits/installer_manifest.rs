@@ -881,6 +881,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_keeps_previous_custom_switch_arguments() {
+        let mut manifest = InstallerManifest {
+            switches: Switches::builder()
+                .custom("/norestart ACCEPT_EULA=1".parse().unwrap())
+                .build(),
+            installers: vec![Installer {
+                architecture: Architecture::X64,
+                r#type: Some(InstallerType::Exe),
+                url: "https://example.com/setup-1.0.0.exe".parse().unwrap(),
+                ..Installer::default()
+            }],
+            ..InstallerManifest::default()
+        };
+        // Analysers emit their own Custom arguments, which must not drop the ones the manifest adds.
+        let new_installer = Installer {
+            architecture: Architecture::X64,
+            r#type: Some(InstallerType::Exe),
+            url: "https://example.com/setup-1.0.1.exe".parse().unwrap(),
+            switches: Switches::builder()
+                .custom("/norestart /clone_wait".parse().unwrap())
+                .build(),
+            ..Installer::default()
+        };
+
+        manifest.update_installers(&[new_installer], &HashMap::new());
+        manifest.optimize();
+
+        assert_eq!(
+            manifest.switches.custom().unwrap().to_string(),
+            "/norestart /clone_wait ACCEPT_EULA=1"
+        );
+    }
+
     #[rstest]
     #[case::shared_user(true, Some(Scope::User), Some(Scope::Machine), Some(Scope::User))]
     #[case::shared_machine(true, Some(Scope::Machine), Some(Scope::User), Some(Scope::Machine))]
