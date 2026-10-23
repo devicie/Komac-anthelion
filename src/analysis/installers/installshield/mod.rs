@@ -50,11 +50,12 @@ pub enum InstallShieldError {
     Ini(#[from] serini::Error),
 }
 
-/// The setup launcher clones itself to %TEMP% and relaunches, and unless the installer was built
+/// Setup.exe can clone itself to a temporary directory and relaunch. Unless the installer was built
 /// with the default `Clone_wait` setting, the original process exits before the installation
-/// finishes, so WinGet reports success while msiexec is still running.
+/// finishes, so WinGet reports success while it is still running. Every project type's launcher
+/// accepts this: InstallScript, Basic MSI, InstallScript MSI and Suite/Advanced UI.
 ///
-/// https://docs.revenera.com/installshield28helplib/helplibrary/Changing_DefaultClone-WaitParameter.htm
+/// https://docs.revenera.com/installshield/helplibrary/IHelpSetup_EXECmdLine.htm
 const CLONE_WAIT: &str = "/clone_wait";
 
 #[derive(Debug)]
@@ -302,6 +303,7 @@ impl Installers for InstallShield {
                     .silent_with_progress("/passive".parse().unwrap())
                     .log("/log \"<LOGPATH>\"".parse().unwrap())
                     .repair("/repair".parse().unwrap())
+                    .custom(CLONE_WAIT.parse().unwrap())
                     .build()
             } else if msi_based {
                 Switches::builder()
@@ -506,38 +508,72 @@ fn read_utf16le_strz<R: Read>(reader: &mut R) -> Result<String, std::io::Error> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rstest::rstest;
     use winget_types::installer::Architecture;
 
     use super::{
-        InstallShield,
-        setup_ini::{Languages, SetupIni, Startup},
+        InstallShield, setup_ini,
+        setup_ini::{SetupIni, Startup},
+        setup_xml,
+        setup_xml::{ArpInfo, LanguageSelection, SetupXml},
     };
     use crate::analysis::Installers;
 
+    fn setup_ini(script_driven: &str) -> SetupIni {
+        SetupIni {
+            startup: Startup {
+                cmd_line: String::new(),
+                script_driven: Some(script_driven.to_owned()),
+                company_name: None,
+                package_name: None,
+                product: None,
+                product_code: None,
+                product_version: None,
+                upgrade_code: None,
+            },
+            languages: setup_ini::Languages {
+                default: "0x0409".to_owned(),
+            },
+        }
+    }
+
+    fn setup_xml() -> SetupXml {
+        SetupXml {
+            suite_id: String::new(),
+            arp_info: ArpInfo {
+                version: String::new(),
+                publisher: String::new(),
+                display_name: String::new(),
+            },
+            language_selection: LanguageSelection {
+                default: "1033".to_owned(),
+            },
+            languages: setup_xml::Languages {
+                language: vec![setup_xml::Language {
+                    lcid: "1033".to_owned(),
+                    strings: HashMap::new(),
+                }],
+            },
+            set_property: Vec::new(),
+        }
+    }
+
     #[rstest]
-    #[case::basic_msi("0")]
-    #[case::installscript("1")]
-    fn setup_launcher_waits_for_clone(#[case] script_driven: &str) {
+    #[case::basic_msi(Some(setup_ini("0")), None)]
+    #[case::installscript(Some(setup_ini("1")), None)]
+    #[case::installscript_msi(Some(setup_ini("2")), None)]
+    #[case::suite(None, Some(setup_xml()))]
+    fn setup_launcher_waits_for_clone(
+        #[case] setup_ini: Option<SetupIni>,
+        #[case] setup_xml: Option<SetupXml>,
+    ) {
         let installshield = InstallShield {
             architecture: Architecture::X86,
-            setup_ini: Some(SetupIni {
-                startup: Startup {
-                    cmd_line: String::new(),
-                    script_driven: Some(script_driven.to_owned()),
-                    company_name: None,
-                    package_name: None,
-                    product: None,
-                    product_code: None,
-                    product_version: None,
-                    upgrade_code: None,
-                },
-                languages: Languages {
-                    default: "0x0409".to_owned(),
-                },
-            }),
+            setup_ini,
             setup_iss: None,
-            setup_xml: None,
+            setup_xml,
         };
 
         let installers = installshield.installers();
