@@ -50,14 +50,6 @@ pub enum InstallShieldError {
     Ini(#[from] serini::Error),
 }
 
-/// Setup.exe can clone itself to a temporary directory and relaunch. Unless the installer was built
-/// with the default `Clone_wait` setting, the original process exits before the installation
-/// finishes, so WinGet reports success while it is still running. Every project type's launcher
-/// accepts this: InstallScript, Basic MSI, InstallScript MSI and Suite/Advanced UI.
-///
-/// https://docs.revenera.com/installshield/helplibrary/Changing_DefaultClone-WaitParameter.htm
-const CLONE_WAIT: &str = "/clone_wait";
-
 #[derive(Debug)]
 pub struct InstallShield {
     pub architecture: Architecture,
@@ -303,7 +295,7 @@ impl Installers for InstallShield {
                     .silent_with_progress("/passive".parse().unwrap())
                     .log("/log \"<LOGPATH>\"".parse().unwrap())
                     .repair("/repair".parse().unwrap())
-                    .custom(CLONE_WAIT.parse().unwrap())
+                    .custom("/clone_wait".parse().unwrap())
                     .build()
             } else if msi_based {
                 Switches::builder()
@@ -311,13 +303,13 @@ impl Installers for InstallShield {
                     .silent_with_progress("/s /v\"/qb /norestart\"".parse().unwrap())
                     .install_location("/v\"INSTALLDIR=\"\"<INSTALLPATH>\"\"\"".parse().unwrap())
                     .log("/v\"/log \"\"<LOGPATH>\"\"\"".parse().unwrap())
-                    .custom(CLONE_WAIT.parse().unwrap())
+                    .custom("/clone_wait".parse().unwrap())
                     .build()
             } else {
                 Switches::builder()
                     .silent("/s".parse().unwrap())
                     .silent_with_progress("/s".parse().unwrap())
-                    .custom(CLONE_WAIT.parse().unwrap())
+                    .custom("/clone_wait".parse().unwrap())
                     .build()
             },
             expected_return_codes: return_codes::expected_return_codes(msi_based),
