@@ -24,9 +24,6 @@ pub struct InstallerSource {
     pub architecture: Option<String>,
     /// ZIP entry patterns to analyze instead of automatic nested-installer selection.
     pub nested_installer_matches: Option<Vec<String>>,
-    /// Override the Apps and Features `DisplayVersion` detected for this artifact's installers.
-    /// For installers that rewrite their ARP entry at install time, which analysis can't see.
-    pub display_version: Option<String>,
 }
 
 /// Analysis of one downloaded artifact.
