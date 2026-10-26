@@ -236,10 +236,11 @@ pub async fn update_package(
         .map(|analysis| (analysis.url, analysis.possible_installer_files))
         .collect::<HashMap<_, _>>();
 
-    manifests.installer.package_version = package_version.clone();
-    manifests
-        .installer
-        .update_installers(&installer_results, &possible_installer_files);
+    manifests.installer.update_installers_with_version(
+        package_version.clone(),
+        &installer_results,
+        &possible_installer_files,
+    );
 
     manifests.installer.locale = None;
     if manifests

@@ -6,9 +6,10 @@ use std::{
 use camino::{Utf8Path, Utf8PathBuf};
 use itertools::Itertools;
 use winget_types::{
+    PackageVersion, Version,
     installer::{
-        Architecture, Installer, InstallerManifest, InstallerType, NestedInstallerFiles,
-        NestedInstallerType,
+        AppsAndFeaturesEntries, AppsAndFeaturesEntry, Architecture, Installer, InstallerManifest,
+        InstallerType, NestedInstallerFiles, NestedInstallerType,
     },
     url::DecodedUrl,
 };
@@ -29,6 +30,16 @@ pub trait InstallerManifestExt {
 
     fn update_installers(
         &mut self,
+        new_installers: &[Installer],
+        possible_installer_files: &HashMap<DecodedUrl, Vec<Utf8PathBuf>>,
+    );
+
+    /// Sets the package version, then updates the installers like `update_installers`, carrying
+    /// over Apps and Features display versions that the previous manifest recorded as the package
+    /// version.
+    fn update_installers_with_version(
+        &mut self,
+        version: PackageVersion,
         new_installers: &[Installer],
         possible_installer_files: &HashMap<DecodedUrl, Vec<Utf8PathBuf>>,
     );
@@ -140,6 +151,93 @@ impl InstallerManifestExt for InstallerManifest {
             )
             .collect();
     }
+
+    fn update_installers_with_version(
+        &mut self,
+        version: PackageVersion,
+        new_installers: &[Installer],
+        possible_installer_files: &HashMap<DecodedUrl, Vec<Utf8PathBuf>>,
+    ) {
+        let previous_version = mem::replace(&mut self.package_version, version);
+        let previous_installers = self.inherit_manifest_properties().collect::<Vec<_>>();
+
+        self.update_installers(new_installers, possible_installer_files);
+
+        // A merged installer keeps its new installer's URL, and its architecture or, for a URL
+        // shared between entries, the previous installer's.
+        let matched_installers = match_installers(&previous_installers, new_installers);
+        for installer in &mut self.installers {
+            let Some(previous_installer) =
+                matched_installers
+                    .iter()
+                    .find_map(|(previous_installer, new_installer)| {
+                        (new_installer.url == installer.url
+                            && (new_installer.architecture == installer.architecture
+                                || previous_installer.architecture == installer.architecture))
+                            .then_some(previous_installer)
+                    })
+            else {
+                continue;
+            };
+            carry_over_display_versions(
+                &previous_installer.apps_and_features_entries,
+                &mut installer.apps_and_features_entries,
+                (&previous_version).into(),
+                (&self.package_version).into(),
+            );
+        }
+    }
+}
+
+/// Analysis reads `DisplayVersion` from installer metadata, which some installers truncate and
+/// then write in full at install time: a GlobalProtect MSI says 6.3.3, but its Apps and Features
+/// entry reads 6.3.3.1199. When the previous manifest recorded the package version as an entry's
+/// display version (explicitly, or by leaving it out), an analysed version that only truncates the
+/// new package version is taken to be the same case. Any other analysed version is kept, so a real
+/// change in the installer's versioning still shows up.
+fn carry_over_display_versions(
+    previous_entries: &AppsAndFeaturesEntries,
+    entries: &mut AppsAndFeaturesEntries,
+    previous_version: &Version,
+    version: &Version,
+) {
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let Some(previous_entry) = previous_entries
+            .iter()
+            .find(|previous| {
+                previous.upgrade_code().is_some() && previous.upgrade_code() == entry.upgrade_code()
+            })
+            .or_else(|| previous_entries.iter().nth(index))
+        else {
+            continue;
+        };
+        let recorded_package_version = previous_entry
+            .display_version()
+            .is_none_or(|display_version| display_version == previous_version);
+        let truncated = entry
+            .display_version()
+            .is_some_and(|display_version| is_truncation_of(display_version, version));
+        if !recorded_package_version || !truncated {
+            continue;
+        }
+
+        *entry = AppsAndFeaturesEntry::builder()
+            .maybe_display_name(entry.display_name())
+            .maybe_publisher(entry.publisher())
+            .display_version(version.clone())
+            .maybe_product_code(entry.product_code())
+            .maybe_upgrade_code(entry.upgrade_code())
+            .maybe_installer_type(entry.installer_type())
+            .build();
+    }
+}
+
+/// Whether `version`'s dot-separated parts are a strict prefix of `full`'s, as 6.3.3 is of
+/// 6.3.3.1199.
+fn is_truncation_of(version: &Version, full: &Version) -> bool {
+    let parts = version.as_str().split('.').collect::<Vec<_>>();
+    let full_parts = full.as_str().split('.').collect::<Vec<_>>();
+    parts.len() < full_parts.len() && full_parts.starts_with(&parts)
 }
 
 fn inherit_installer_properties(installer: Installer, manifest: &InstallerManifest) -> Installer {
@@ -249,12 +347,15 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use rstest::rstest;
-    use winget_types::installer::{
-        Architecture, Installer, InstallerManifest, InstallerType, NestedInstallerFiles,
-        NestedInstallerType, Scope, Switches, UpgradeBehavior,
+    use winget_types::{
+        Version,
+        installer::{
+            AppsAndFeaturesEntry, Architecture, Installer, InstallerManifest, InstallerType,
+            NestedInstallerFiles, NestedInstallerType, Scope, Switches, UpgradeBehavior,
+        },
     };
 
-    use super::{InstallerManifestExt, fix_relative_paths, merge_installer};
+    use super::{InstallerManifestExt, fix_relative_paths, is_truncation_of, merge_installer};
     use crate::manifests::to_yaml_string;
 
     #[rstest]
@@ -938,6 +1039,118 @@ mod tests {
         assert_eq!(
             merge_installer(previous_installer, new_installer, duplicate_url).scope,
             expected_scope
+        );
+    }
+
+    fn msi(version: &str, architecture: Architecture, display_version: Option<&str>) -> Installer {
+        let file = if architecture == Architecture::X64 {
+            "GlobalProtect64.msi"
+        } else {
+            "GlobalProtect.msi"
+        };
+        Installer {
+            architecture,
+            r#type: Some(InstallerType::Msi),
+            url: format!("https://example.com/{version}/{file}")
+                .parse()
+                .unwrap(),
+            apps_and_features_entries: AppsAndFeaturesEntry::builder()
+                .maybe_display_version(display_version)
+                .upgrade_code(format!("{{{architecture}}}"))
+                .build()
+                .into(),
+            ..Installer::default()
+        }
+    }
+
+    fn display_versions(manifest: &InstallerManifest) -> Vec<(Architecture, Option<String>)> {
+        let mut versions = manifest
+            .installers
+            .iter()
+            .flat_map(|installer| {
+                installer.apps_and_features_entries.iter().map(|entry| {
+                    (
+                        installer.architecture,
+                        entry.display_version().map(ToString::to_string),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions
+    }
+
+    #[test]
+    fn update_carries_over_display_versions_recorded_as_the_package_version() {
+        // x64 writes the package version to ARP, so its entry leaves DisplayVersion out; x86
+        // writes the MSI's three-part ProductVersion.
+        let mut manifest = InstallerManifest {
+            package_version: "6.3.3.1199".parse().unwrap(),
+            installers: vec![
+                msi("6.3.3-1199", Architecture::X86, Some("6.3.3")),
+                msi("6.3.3-1199", Architecture::X64, None),
+            ],
+            ..InstallerManifest::default()
+        };
+        // Both MSIs only carry the three-part ProductVersion.
+        let new_installers = [
+            msi("6.3.3-1250", Architecture::X86, Some("6.3.3")),
+            msi("6.3.3-1250", Architecture::X64, Some("6.3.3")),
+        ];
+
+        manifest.update_installers_with_version(
+            "6.3.3.1250".parse().unwrap(),
+            &new_installers,
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            display_versions(&manifest),
+            [
+                (Architecture::X86, Some("6.3.3".to_owned())),
+                (Architecture::X64, Some("6.3.3.1250".to_owned())),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case::not_a_truncation(None, "1.2.4.0")]
+    #[case::previous_display_version_differed(Some("1.2"), "1.2")]
+    fn update_keeps_analysed_display_versions(
+        #[case] previous_display_version: Option<&str>,
+        #[case] analysed: &str,
+    ) {
+        let mut manifest = InstallerManifest {
+            package_version: "1.2.2".parse().unwrap(),
+            installers: vec![msi("1.2.2", Architecture::X64, previous_display_version)],
+            ..InstallerManifest::default()
+        };
+
+        manifest.update_installers_with_version(
+            "1.2.3".parse().unwrap(),
+            &[msi("1.2.3", Architecture::X64, Some(analysed))],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            display_versions(&manifest),
+            [(Architecture::X64, Some(analysed.to_owned()))]
+        );
+    }
+
+    #[rstest]
+    #[case("6.3.3", "6.3.3.1199", true)]
+    #[case("6.3.3", "6.3.3", false)]
+    #[case("6.3", "6.30.1", false)]
+    #[case("6.3.3.1199", "6.3.3", false)]
+    fn truncation_compares_whole_version_parts(
+        #[case] version: &str,
+        #[case] full: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            is_truncation_of(&Version::new(version), &Version::new(full)),
+            expected
         );
     }
 }

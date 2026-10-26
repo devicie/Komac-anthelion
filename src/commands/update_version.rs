@@ -169,10 +169,11 @@ impl UpdateVersion {
             installer_results.extend(analyzer.into_installers());
         }
 
-        manifests.installer.package_version = self.version.clone();
-        manifests
-            .installer
-            .update_installers(&installer_results, &possible_installer_files);
+        manifests.installer.update_installers_with_version(
+            self.version.clone(),
+            &installer_results,
+            &possible_installer_files,
+        );
 
         manifests.installer.locale = None;
         manifests
