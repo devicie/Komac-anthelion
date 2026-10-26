@@ -7,8 +7,11 @@ use indexmap::IndexMap;
 use jiff::civil::Date;
 use napi::Either;
 use winget_types::{
-    Sha256String,
-    installer::{Architecture, InstallerManifest, InstallerType},
+    Sha256String, Version,
+    installer::{
+        AppsAndFeaturesEntry as ManifestAppsAndFeaturesEntry, Architecture, Installer,
+        InstallerManifest, InstallerType,
+    },
     url::DecodedUrl,
 };
 
@@ -45,6 +48,7 @@ pub(super) struct ParsedInstallerSource {
     pub(super) url: Url,
     architecture: Option<Architecture>,
     nested_installer_matches: Vec<String>,
+    display_version: Option<Version>,
 }
 
 pub(super) fn parse_installer_inputs(
@@ -57,12 +61,13 @@ pub(super) fn parse_installer_inputs(
     inputs
         .into_iter()
         .map(|input| {
-            let (url, architecture, nested_installer_matches) = match input {
-                Either::A(url) => (url, None, None),
+            let (url, architecture, nested_installer_matches, display_version) = match input {
+                Either::A(url) => (url, None, None, None),
                 Either::B(source) => (
                     source.url,
                     source.architecture,
                     source.nested_installer_matches,
+                    source.display_version,
                 ),
             };
             Ok(ParsedInstallerSource {
@@ -77,6 +82,17 @@ pub(super) fn parse_installer_inputs(
                     })
                     .transpose()?,
                 nested_installer_matches: nested_installer_matches.unwrap_or_default(),
+                display_version: display_version
+                    .map(|display_version| {
+                        let display_version = display_version.trim();
+                        if display_version.is_empty() {
+                            return Err(InvalidArgument(
+                                "Installer display version must not be empty".into(),
+                            ));
+                        }
+                        Ok(Version::from(display_version))
+                    })
+                    .transpose()?,
             })
         })
         .collect()
@@ -124,7 +140,7 @@ pub(super) async fn analyze_sources(
                 .entry(key.clone())
                 .or_insert((source.url, 0_usize))
                 .1 += 1;
-            (key, source.architecture)
+            (key, source.architecture, source.display_version)
         })
         .collect::<Vec<_>>();
 
@@ -162,7 +178,7 @@ pub(super) async fn analyze_sources(
 
     parsed_sources
         .into_iter()
-        .map(|(source_key, architecture)| {
+        .map(|(source_key, architecture, display_version)| {
             let mut analysis = match analyzed_by_url.entry(source_key) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     if entry.get().1 == 1 {
@@ -182,9 +198,37 @@ pub(super) async fn analyze_sources(
                     installer.installer.architecture = architecture;
                 }
             }
+            if let Some(display_version) = display_version {
+                for installer in &mut analysis.installers {
+                    override_display_version(&mut installer.installer, &display_version);
+                }
+            }
             Ok(analysis)
         })
         .collect()
+}
+
+/// Replaces the detected `DisplayVersion` of every ARP entry, adding an entry if analysis found none.
+fn override_display_version(installer: &mut Installer, display_version: &Version) {
+    if installer.apps_and_features_entries.is_empty() {
+        installer.apps_and_features_entries.push(
+            ManifestAppsAndFeaturesEntry::builder()
+                .display_version(display_version.clone())
+                .build(),
+        );
+        return;
+    }
+
+    for entry in installer.apps_and_features_entries.iter_mut() {
+        *entry = ManifestAppsAndFeaturesEntry::builder()
+            .maybe_display_name(entry.display_name())
+            .maybe_publisher(entry.publisher())
+            .display_version(display_version.clone())
+            .maybe_product_code(entry.product_code())
+            .maybe_upgrade_code(entry.upgrade_code())
+            .maybe_installer_type(entry.installer_type())
+            .build();
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -361,10 +405,87 @@ impl From<MatchedInstaller> for AnalyzedInstaller {
 
 #[cfg(test)]
 mod tests {
-    use winget_types::installer::Installer;
+    use napi::Either;
+    use winget_types::{
+        Version,
+        installer::{AppsAndFeaturesEntry, Installer, InstallerType},
+    };
 
-    use super::{AnalysisKey, MatchedInstaller, parse_installer_url};
-    use crate::anthelion::types::AnalyzedInstaller;
+    use super::{
+        AnalysisKey, MatchedInstaller, override_display_version, parse_installer_inputs,
+        parse_installer_url,
+    };
+    use crate::anthelion::types::{AnalyzedInstaller, InstallerSource};
+
+    fn source(display_version: Option<&str>) -> InstallerSource {
+        InstallerSource {
+            url: "https://example.com/app.msi".to_owned(),
+            architecture: None,
+            nested_installer_matches: None,
+            display_version: display_version.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn display_version_override_is_parsed() {
+        let parsed = parse_installer_inputs(vec![Either::B(source(Some(" 6.3.3.1199 ")))]).unwrap();
+
+        assert_eq!(parsed[0].display_version, Some(Version::new("6.3.3.1199")));
+    }
+
+    #[test]
+    fn empty_display_version_override_is_rejected() {
+        assert!(parse_installer_inputs(vec![Either::B(source(Some("  ")))]).is_err());
+    }
+
+    #[test]
+    fn display_version_override_keeps_other_arp_fields() {
+        let mut installer = Installer {
+            apps_and_features_entries: AppsAndFeaturesEntry::builder()
+                .display_name("GlobalProtect")
+                .publisher("Palo Alto Networks")
+                .display_version("6.3.3")
+                .product_code("{100C89D5-6C57-422D-836B-1627C7B01B06}")
+                .upgrade_code("{B99D679A-ABA5-400F-8E00-3A4163F961FE}")
+                .installer_type(InstallerType::Msi)
+                .build()
+                .into(),
+            ..Installer::default()
+        };
+
+        override_display_version(&mut installer, &Version::new("6.3.3.1199"));
+
+        assert_eq!(
+            installer
+                .apps_and_features_entries
+                .iter()
+                .collect::<Vec<_>>(),
+            [&AppsAndFeaturesEntry::builder()
+                .display_name("GlobalProtect")
+                .publisher("Palo Alto Networks")
+                .display_version("6.3.3.1199")
+                .product_code("{100C89D5-6C57-422D-836B-1627C7B01B06}")
+                .upgrade_code("{B99D679A-ABA5-400F-8E00-3A4163F961FE}")
+                .installer_type(InstallerType::Msi)
+                .build()]
+        );
+    }
+
+    #[test]
+    fn display_version_override_adds_an_entry_when_none_was_detected() {
+        let mut installer = Installer::default();
+
+        override_display_version(&mut installer, &Version::new("1.2.3.4"));
+
+        assert_eq!(
+            installer
+                .apps_and_features_entries
+                .iter()
+                .map(AppsAndFeaturesEntry::display_version)
+                .collect::<Vec<_>>(),
+            [Some(&Version::new("1.2.3.4"))]
+        );
+    }
 
     #[test]
     fn keeps_architecture_out_of_the_url() {
