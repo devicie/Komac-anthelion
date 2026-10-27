@@ -111,6 +111,12 @@ impl Msi {
                     .and_then(|install_dir| self.build_directory(install_dir, TARGET_DIR))
             })
             .or_else(|| {
+                // Check for an `INSTALLFOLDER` directory entry, the name WiX's templates use
+                const INSTALL_FOLDER: &str = "INSTALLFOLDER";
+
+                self.build_directory(INSTALL_FOLDER, TARGET_DIR)
+            })
+            .or_else(|| {
                 // Check for an `INSTALLLOCATION` directory entry
                 const INSTALL_LOCATION: &str = "INSTALLLOCATION";
 
@@ -224,10 +230,17 @@ impl Msi {
             .filter(|language_tag| language_tag != &langid!("und"))
     }
 
+    /// Returns the directory that `WIXUI_INSTALLDIR` points at.
+    ///
+    /// Some installers, such as the Netskope Client, point it at `TARGETDIR`, the root of the
+    /// directory table. That says nothing about the install directory, and setting `TARGETDIR`
+    /// doesn't move directories under system folders such as `ProgramFilesFolder`, so it's ignored.
     fn wix_ui_install_dir(&self) -> Option<&str> {
         const WIX_UI_INSTALL_DIR: &str = "WIXUI_INSTALLDIR";
 
-        self.property_table.get(WIX_UI_INSTALL_DIR)
+        self.property_table
+            .get(WIX_UI_INSTALL_DIR)
+            .filter(|&install_dir| install_dir != TARGET_DIR)
     }
 
     fn install_location_switches(&self) -> Switches {
@@ -304,5 +317,45 @@ impl Installers for Msi {
         };
 
         vec![installer]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use winget_types::installer::Architecture;
+
+    use super::{Msi, directory_table::DirectoryTable, property_table::PropertyTable};
+
+    #[test]
+    fn ignores_wix_ui_install_dir_pointing_at_target_dir() {
+        // Mirrors the Netskope Client MSI, which sets `WIXUI_INSTALLDIR` to `TARGETDIR`
+        let msi = Msi {
+            architecture: Architecture::X86,
+            may_mutate_all_users: false,
+            property_table: PropertyTable::from_iter([
+                ("WIXUI_INSTALLDIR", "TARGETDIR"),
+                ("ALLUSERS", "1"),
+            ]),
+            directory_table: DirectoryTable::from_iter([
+                ("INSTALLFOLDER", Some("CompanyName"), "STAgent"),
+                ("CompanyName", Some("ProgramFilesFolder"), "Netskope"),
+                ("ProgramFilesFolder", Some("TARGETDIR"), "."),
+                ("CommonAppDataFolder", Some("TARGETDIR"), "."),
+                ("TARGETDIR", None, "SourceDir"),
+            ]),
+            creating_application: None,
+            comments: None,
+        };
+
+        assert!(msi.install_location_switches().is_empty());
+        assert_eq!(
+            msi.find_install_directory(),
+            Some(Utf8PathBuf::from_iter([
+                "%ProgramFiles(x86)%",
+                "Netskope",
+                "STAgent"
+            ]))
+        );
     }
 }
