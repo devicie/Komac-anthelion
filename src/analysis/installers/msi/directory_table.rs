@@ -156,6 +156,22 @@ impl<'a> IntoIterator for &'a DirectoryTable {
     }
 }
 
+#[cfg(test)]
+impl<'a> FromIterator<(&'a str, Option<&'a str>, &'a str)> for DirectoryTable {
+    fn from_iter<T: IntoIterator<Item = (&'a str, Option<&'a str>, &'a str)>>(iter: T) -> Self {
+        Self(
+            iter.into_iter()
+                .map(|(directory, parent, default_dir)| {
+                    (
+                        directory.to_owned(),
+                        (parent.map(str::to_owned), default_dir.to_owned()),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
 pub fn get_property_relative_path(property: &str) -> Option<&str> {
     const PROGRAM_FILES_64_FOLDER: &str = "ProgramFiles64Folder";
     const PROGRAM_FILES_FOLDER: &str = "ProgramFilesFolder";
