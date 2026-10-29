@@ -5,6 +5,7 @@ use std::{
 
 use camino::Utf8Path;
 use color_eyre::eyre::{Result, WrapErr, bail};
+use tracing::warn;
 use winget_types::{
     installer::{Architecture, Installer, InstallerType},
     locale::{Copyright, PackageName, Publisher},
@@ -115,6 +116,11 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
             }
             ValidFileExtensions::Exe => {
                 let mut exe = Exe::new(reader)?;
+                if exe.is_unrecognised() {
+                    warn!(
+                        "The installer framework of {file_name} wasn't recognised, so its installer type is a guess and its installer switches must be added manually"
+                    );
+                }
                 let mut installers = exe.installers();
                 override_x86_from_file_name(&mut installers, file_name);
                 return Ok(Self {

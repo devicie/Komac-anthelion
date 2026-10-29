@@ -21,7 +21,7 @@ use crate::{
             pe::{PE, VSVersionInfo},
             qt_ifw::QtIfwError,
             sevenzip_sfx::SevenZipSfxError,
-            sfxcab::SfxCabError,
+            sfxcab::{SfxCabError, setup_chainer_switches},
             squirrel::SquirrelError,
         },
     },
@@ -30,7 +30,12 @@ use crate::{
 
 const ORIGINAL_FILENAME: &str = "OriginalFilename";
 const FILE_DESCRIPTION: &str = "FileDescription";
-const BASIC_INSTALLER_KEYWORDS: [&str; 4] = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+const BASIC_INSTALLER_KEYWORDS: [&str; 5] =
+    ["installer", "setup", "bootstrapper", "7zs.sfx", "7zsd.sfx"];
+
+/// The original file name of the self-extractor used by the .NET Framework 4.5 and later setups,
+/// which runs the setup chainer.
+const BOX_STUB: &str = "BoxStub.exe";
 
 pub struct Exe {
     r#type: ExeType,
@@ -264,6 +269,23 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
+        if is_box_stub(&mut reader, &pe) {
+            return Ok(Self {
+                r#type: ExeType::Generic(Box::new(Installer {
+                    architecture: pe.winget_architecture(),
+                    r#type: Some(InstallerType::Exe),
+                    switches: setup_chainer_switches(),
+                    ..Installer::default()
+                })),
+                legal_copyright,
+                product_name,
+                company_name,
+                file_version,
+                product_version,
+                pe_info,
+            });
+        }
+
         Ok(Self {
             r#type: ExeType::Generic(Box::new(Installer {
                 architecture: pe.winget_architecture(),
@@ -271,11 +293,7 @@ impl Exe {
                     let original_filename = table.swap_remove(ORIGINAL_FILENAME);
                     let file_description = table.swap_remove(FILE_DESCRIPTION);
 
-                    BASIC_INSTALLER_KEYWORDS.iter().any(|keyword| {
-                        original_filename.is_some_and(|filename| filename.contains(keyword))
-                            || file_description
-                                .is_some_and(|description| description.contains(keyword))
-                    })
+                    is_installer_name(original_filename, file_description)
                 }) {
                     Some(InstallerType::Exe)
                 } else {
@@ -291,6 +309,48 @@ impl Exe {
             pe_info,
         })
     }
+}
+
+impl Exe {
+    /// Returns `true` if the installer framework wasn't recognised, so the installer type is a
+    /// guess and there are no installer switches.
+    #[inline]
+    pub fn is_unrecognised(&self) -> bool {
+        matches!(&self.r#type, ExeType::Generic(installer) if installer.switches.is_empty())
+    }
+}
+
+/// Returns `true` if the original file name or file description suggests that the executable is
+/// an installer.
+fn is_installer_name(original_filename: Option<&str>, file_description: Option<&str>) -> bool {
+    let contains_keyword = |value: &str| {
+        let value = value.to_ascii_lowercase();
+        BASIC_INSTALLER_KEYWORDS
+            .iter()
+            .any(|keyword| value.contains(keyword))
+    };
+
+    original_filename.is_some_and(|filename| {
+        contains_keyword(filename)
+            || filename
+                .rsplit_once('.')
+                .map_or(filename, |(stem, _extension)| stem)
+                .to_ascii_lowercase()
+                .ends_with("install")
+    }) || file_description.is_some_and(contains_keyword)
+}
+
+/// Returns `true` if any version info of the executable is that of .NET's Box Stub.
+fn is_box_stub<R: Read + Seek>(reader: R, pe: &PE) -> bool {
+    pe.vs_version_infos(reader).is_ok_and(|version_infos| {
+        version_infos.iter().any(|version_info| {
+            VSVersionInfo::read_from(version_info).is_ok_and(|version_info| {
+                version_info.string_entries().any(|(key, value)| {
+                    key == ORIGINAL_FILENAME && value.trim().eq_ignore_ascii_case(BOX_STUB)
+                })
+            })
+        })
+    })
 }
 
 impl Installers for Exe {

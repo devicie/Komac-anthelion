@@ -165,11 +165,7 @@ impl Installers for SfxCab {
     fn installers(&self) -> Vec<Installer> {
         // The command line is passed through to the command that is run after extracting
         let switches = match self.bootstrapper {
-            Bootstrapper::SetupChainer => Switches::builder()
-                .silent("/q /norestart".parse().unwrap())
-                .silent_with_progress("/passive /norestart".parse().unwrap())
-                .log(r#"/log "<LOGPATH>""#.parse().unwrap())
-                .build(),
+            Bootstrapper::SetupChainer => setup_chainer_switches(),
             Bootstrapper::VisualStudio2008 => Switches::builder()
                 .silent("/q".parse().unwrap())
                 .silent_with_progress("/qb".parse().unwrap())
@@ -192,6 +188,15 @@ impl Installers for SfxCab {
             ..Installer::default()
         }]
     }
+}
+
+/// Returns the switches of the setup chainer, which is configured by `ParameterInfo.xml`.
+pub fn setup_chainer_switches() -> Switches {
+    Switches::builder()
+        .silent("/q /norestart".parse().unwrap())
+        .silent_with_progress("/passive /norestart".parse().unwrap())
+        .log(r#"/log "<LOGPATH>""#.parse().unwrap())
+        .build()
 }
 
 /// Returns `true` if any version info of the executable is that of the self-extractor.
