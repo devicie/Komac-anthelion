@@ -349,6 +349,15 @@ impl Exe {
     }
 }
 
+impl Exe {
+    /// Returns `true` if the installer framework wasn't recognised, so the installer type is a
+    /// guess and there are no installer switches.
+    #[inline]
+    pub fn is_unrecognised(&self) -> bool {
+        matches!(&self.r#type, ExeType::Generic(installer) if installer.switches.is_empty())
+    }
+}
+
 /// Returns `true` if the original file name or file description suggests that the executable is
 /// an installer.
 fn is_installer_name(original_filename: Option<&str>, file_description: Option<&str>) -> bool {
