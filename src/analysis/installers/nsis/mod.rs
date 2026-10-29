@@ -67,18 +67,13 @@ pub struct Nsis {
 impl Nsis {
     pub fn new<R: Read + Seek>(mut reader: R, pe: &PE) -> Result<Self, NsisError> {
         // Get the PE overlay offset
-        let first_header_offset = pe.overlay_offset().ok_or(NsisError::NotNsisFile)?;
+        let overlay_offset = pe.overlay_offset().ok_or(NsisError::NotNsisFile)?;
 
         let manifest = pe.manifest(&mut reader).ok();
 
-        // Seek to the first header
-        reader
-            .seek(SeekFrom::Start(first_header_offset))
-            .map_err(|_| NsisError::NotNsisFile)?;
-
-        // Read the first header
-        let first_header =
-            FirstHeader::try_read_from_io(&mut reader).map_err(|_| NsisError::NotNsisFile)?;
+        // Find and read the first header
+        let (first_header_offset, first_header) =
+            FirstHeader::find(&mut reader, overlay_offset).map_err(|_| NsisError::NotNsisFile)?;
 
         let data_offset = first_header_offset + size_of::<FirstHeader>() as u64;
 
