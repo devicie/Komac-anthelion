@@ -8,6 +8,7 @@ use zerocopy::{FromBytes, I32, LE, U16};
 use super::{
     Variables,
     entry::{Entry, EntryError, ExecFlags, system::MockCaller},
+    park::{self, ParkLayout},
 };
 use crate::analysis::installers::nsis::{
     NsisError,
@@ -22,7 +23,7 @@ use crate::analysis::installers::nsis::{
 
 pub struct NsisState<'data> {
     pub str_block: &'data [u8],
-    entries: &'data [Entry],
+    entries: Cow<'data, [Entry]>,
     pub language_table: &'data LanguageTable,
     pub stack: Vec<Cow<'data, str>>,
     pub variables: Variables<'data>,
@@ -43,7 +44,7 @@ impl<'data> NsisState<'data> {
     ) -> Result<Self, NsisError> {
         let mut state = Self {
             str_block: header.blocks().strings_block(data),
-            entries: header.blocks().entries(data)?,
+            entries: Cow::Borrowed(&[]),
             language_table: LanguageTable::primary_language(data, header.blocks())?,
             stack: Vec::new(),
             variables: Variables::new(),
@@ -63,6 +64,16 @@ impl<'data> NsisState<'data> {
 
         debug!(version = %state.version);
 
+        // Park inserts opcodes into the NSIS 2 opcode table, so its entries must be translated
+        state.entries = if state.is_park() {
+            let raw_entries = park::raw_entries(header.blocks().entries_block(data))?;
+            let layout = ParkLayout::detect(raw_entries, state.str_block, state.is_unicode());
+            debug!(?layout);
+            Cow::Owned(layout.read_entries(raw_entries))
+        } else {
+            Cow::Borrowed(header.blocks().entries(data)?)
+        };
+
         // The install directory must be read after the version is determined; `get_string` depends on it
         if let Some(install_directory_ptr) = header.install_directory() {
             let install_dir = state.get_string(install_directory_ptr);
@@ -76,6 +87,13 @@ impl<'data> NsisState<'data> {
     #[inline]
     pub const fn is_park(&self) -> bool {
         self.version.is_park()
+    }
+
+    /// Returns `true` if the strings block is Unicode, which is indicated by it starting with a
+    /// UTF-16 null byte.
+    #[inline]
+    pub fn is_unicode(&self) -> bool {
+        self.str_block.starts_with(b"\0\0")
     }
 
     /// Returns `true` if the NSIS executable is portable.
@@ -103,8 +121,17 @@ impl<'data> NsisState<'data> {
         reason = "Truncating u16 as u8 is intentional"
     )]
     pub fn get_string(&self, relative_offset: i32) -> Cow<'data, str> {
-        // The strings block starts with a UTF-16 null byte if it is Unicode
-        let unicode = &self.str_block[..size_of::<u16>()] == b"\0\0";
+        let unicode = self.is_unicode();
+
+        // Park's Unicode strings use their own codes, while its ANSI strings use the NSIS 2 codes
+        let park = unicode && self.is_park();
+        let to_code = |char: u16| {
+            if park {
+                NsCode::try_from_park(char)
+            } else {
+                NsCode::try_new_with_version(char, self.version)
+            }
+        };
 
         // Double the offset if the string is Unicode as each character will be 2 bytes
         let offset = if relative_offset.is_negative() {
@@ -146,15 +173,9 @@ impl<'data> NsisState<'data> {
             Either::Right(string_bytes)
         };
 
-        if self.is_park() {
-            todo!("NSIS Park support");
-        }
-
         // Check whether the string contains any special characters that need to be decoded
         let contains_code = match string_chars {
-            Either::Left(chars) => chars
-                .iter()
-                .any(|char| NsCode::is_code(char.get(), self.version)),
+            Either::Left(chars) => chars.iter().any(|char| to_code(char.get()).is_some()),
             Either::Right(bytes) => bytes
                 .iter()
                 .any(|&char| NsCode::is_code(char, self.version)),
@@ -177,7 +198,7 @@ impl<'data> NsisState<'data> {
             if buf.len() >= MAX_STRING_LENGTH {
                 break;
             }
-            if let Some(code) = NsCode::try_new_with_version(current, self.version) {
+            if let Some(code) = to_code(current) {
                 let Some(next) = characters.next() else {
                     break;
                 };
@@ -193,7 +214,11 @@ impl<'data> NsisState<'data> {
                     if code.is_shell() {
                         Shell::resolve(&mut buf, self, special_char);
                     } else {
-                        let index = usize::from(decode_number_from_char(special_char));
+                        let index = usize::from(if park {
+                            special_char & 0x7FFF
+                        } else {
+                            decode_number_from_char(special_char)
+                        });
                         if code.is_var() {
                             NsVar::resolve(&mut buf, index, &self.variables, self.version);
                         } else if code.is_lang()

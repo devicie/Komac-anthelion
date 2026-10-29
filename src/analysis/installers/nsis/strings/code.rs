@@ -20,6 +20,20 @@ pub enum NsCode {
 }
 
 impl NsCode {
+    /// Jim Park's Unicode fork of NSIS 2 moves the NSIS 2 codes into the Unicode Private Use Area,
+    /// keeping their order.
+    ///
+    /// <https://github.com/mcmilk/7-Zip/blob/HEAD/CPP/7zip/Archive/Nsis/NsisIn.cpp#L659>
+    const PARK_SKIP: u16 = 0xE000;
+
+    /// Returns the code for a character in a Unicode NSIS Park strings block.
+    pub fn try_from_park(code: u16) -> Option<Self> {
+        code.checked_sub(Self::PARK_SKIP)
+            .and_then(|offset| u8::try_from(offset).ok())
+            .and_then(|offset| (Self::SkipV2 as u8).checked_add(offset))
+            .and_then(|code| Self::try_from(code).ok())
+    }
+
     pub fn try_new_with_version<T>(code: T, version: NsisVersion) -> Option<Self>
     where
         T: TryInto<Self>,
@@ -126,5 +140,19 @@ mod tests {
         assert!(!NsCode::VarV3.is_v2());
         assert!(!NsCode::ShellV3.is_v2());
         assert!(!NsCode::LangV3.is_v2());
+    }
+
+    #[test]
+    fn park() {
+        assert!(NsCode::try_from_park(0xE000).is_some_and(NsCode::is_skip));
+        assert!(NsCode::try_from_park(0xE001).is_some_and(NsCode::is_var));
+        assert!(NsCode::try_from_park(0xE002).is_some_and(NsCode::is_shell));
+        assert!(NsCode::try_from_park(0xE003).is_some_and(NsCode::is_lang));
+
+        assert!(NsCode::try_from_park(0xDFFF).is_none());
+        assert!(NsCode::try_from_park(0xE004).is_none());
+        assert!(NsCode::try_from_park(u16::from(b'A')).is_none());
+        assert!(NsCode::try_from_park(u16::from(NsCode::VarV2 as u8)).is_none());
+        assert!(NsCode::try_from_park(u16::from(NsCode::VarV3 as u8)).is_none());
     }
 }
