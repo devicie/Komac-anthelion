@@ -312,3 +312,66 @@ pub struct Capabilities {
 pub struct FileTypeAssociation {
     supported_file_types: BTreeSet<FileExtension>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+
+    use indoc::formatdoc;
+    use rstest::rstest;
+    use winget_types::installer::MinimumOSVersion;
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    use super::{APPX_MANIFEST_XML, Msix};
+    use crate::analysis::Installers;
+
+    fn msix(target_device_families: &str) -> Msix {
+        let manifest = formatdoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+              <Identity Name="Test.App" Publisher="CN=Test" Version="1.0.0.0" ProcessorArchitecture="x64" />
+              <Properties>
+                <DisplayName>Test App</DisplayName>
+                <PublisherDisplayName>Test</PublisherDisplayName>
+              </Properties>
+              <Dependencies>
+                {target_device_families}
+              </Dependencies>
+            </Package>
+        "#};
+
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(APPX_MANIFEST_XML, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
+        zip.start_file("AppxSignature.p7x", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"signature").unwrap();
+
+        Msix::new(Cursor::new(zip.finish().unwrap().into_inner())).unwrap()
+    }
+
+    #[rstest]
+    #[case::desktop_higher_than_universal(
+        r#"<TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+           <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26100.0" />"#,
+        MinimumOSVersion::new(10, 0, 26100, 0)
+    )]
+    #[case::desktop_lower_than_universal(
+        r#"<TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.19041.0" />
+           <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />"#,
+        MinimumOSVersion::new(10, 0, 17763, 0)
+    )]
+    #[case::universal_only(
+        r#"<TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.19041.0" />"#,
+        MinimumOSVersion::new(10, 0, 19041, 0)
+    )]
+    fn minimum_os_version_prefers_windows_desktop(
+        #[case] target_device_families: &str,
+        #[case] expected: MinimumOSVersion,
+    ) {
+        let installer = msix(target_device_families).installers().remove(0);
+
+        assert_eq!(installer.minimum_os_version, Some(expected));
+    }
+}
