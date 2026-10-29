@@ -134,7 +134,7 @@ impl InstallShield {
         debug!(files = ?files.iter().map(|file| file.name.as_str()).collect::<Vec<_>>());
 
         let setup_ini = find_and_parse(&files, &mut reader, "setup.ini", |content| {
-            serini::from_str::<SetupIni>(content).ok()
+            SetupIni::from_str(content).ok()
         });
 
         let setup_iss = find_and_parse(&files, &mut reader, "setup.iss", |content| {
@@ -245,8 +245,9 @@ impl Installers for InstallShield {
         let locale = self
             .setup_ini
             .as_ref()
-            .and_then(|ini| {
-                u16::from_str_radix(ini.languages.default.trim_start_matches("0x"), 16).ok()
+            .and_then(|ini| ini.languages.as_ref())
+            .and_then(|languages| {
+                u16::from_str_radix(languages.default.trim_start_matches("0x"), 16).ok()
             })
             .or_else(|| xml.and_then(|xml| xml.language_selection.default.parse().ok()))
             .and_then(|id| Language::from_code(id).tag().parse::<LanguageTag>().ok());
@@ -516,7 +517,7 @@ mod tests {
     fn setup_ini(script_driven: &str) -> SetupIni {
         SetupIni {
             startup: Startup {
-                cmd_line: String::new(),
+                cmd_line: None,
                 script_driven: Some(script_driven.to_owned()),
                 company_name: None,
                 package_name: None,
@@ -525,9 +526,9 @@ mod tests {
                 product_version: None,
                 upgrade_code: None,
             },
-            languages: setup_ini::Languages {
+            languages: Some(setup_ini::Languages {
                 default: "0x0409".to_owned(),
-            },
+            }),
         }
     }
 
