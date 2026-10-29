@@ -256,7 +256,6 @@ fn command_from_manifest(manifest: &str) -> Option<&str> {
     })
 }
 
-/// Returns the program of a command.
 /// Returns the file name of the program of a command.
 fn program_name(command: &str) -> Option<&str> {
     let program = command.split_ascii_whitespace().next()?;
