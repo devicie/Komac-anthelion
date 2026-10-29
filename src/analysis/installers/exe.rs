@@ -22,7 +22,7 @@ use crate::{
             pe::{PE, VSVersionInfo},
             qt_ifw::QtIfwError,
             sevenzip_sfx::SevenZipSfxError,
-            sfxcab::SfxCabError,
+            sfxcab::{SfxCabError, setup_chainer_switches},
             squirrel::SquirrelError,
         },
     },
@@ -32,6 +32,10 @@ use crate::{
 const ORIGINAL_FILENAME: &str = "OriginalFilename";
 const FILE_DESCRIPTION: &str = "FileDescription";
 const BASIC_INSTALLER_KEYWORDS: [&str; 4] = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+
+/// The original file name of the self-extractor used by the .NET Framework 4.5 and later setups,
+/// which runs the setup chainer.
+const BOX_STUB: &str = "BoxStub.exe";
 
 pub struct Exe {
     r#type: ExeType,
@@ -301,6 +305,23 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
+        if is_box_stub(&mut reader, &pe) {
+            return Ok(Self {
+                r#type: ExeType::Generic(Box::new(Installer {
+                    architecture: pe.winget_architecture(),
+                    r#type: Some(InstallerType::Exe),
+                    switches: setup_chainer_switches(),
+                    ..Installer::default()
+                })),
+                legal_copyright,
+                product_name,
+                company_name,
+                file_version,
+                product_version,
+                pe_info,
+            });
+        }
+
         Ok(Self {
             r#type: ExeType::Generic(Box::new(Installer {
                 architecture: pe.winget_architecture(),
@@ -331,6 +352,19 @@ impl Exe {
             pe_info,
         })
     }
+}
+
+/// Returns `true` if any version info of the executable is that of .NET's Box Stub.
+fn is_box_stub<R: Read + Seek>(reader: R, pe: &PE) -> bool {
+    pe.vs_version_infos(reader).is_ok_and(|version_infos| {
+        version_infos.iter().any(|version_info| {
+            VSVersionInfo::read_from(version_info).is_ok_and(|version_info| {
+                version_info.string_entries().any(|(key, value)| {
+                    key == ORIGINAL_FILENAME && value.trim().eq_ignore_ascii_case(BOX_STUB)
+                })
+            })
+        })
+    })
 }
 
 impl Installers for Exe {
