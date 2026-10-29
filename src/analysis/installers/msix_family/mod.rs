@@ -374,4 +374,16 @@ mod tests {
 
         assert_eq!(installer.minimum_os_version, Some(expected));
     }
+
+    /// MSIX packages aren't listed in Apps and Features, so they shouldn't have entries for it
+    #[test]
+    fn no_apps_and_features_entries() {
+        let installer = msix(
+            r#"<TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />"#,
+        )
+        .installers()
+        .remove(0);
+
+        assert!(installer.apps_and_features_entries.is_empty());
+    }
 }
