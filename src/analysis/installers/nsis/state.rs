@@ -6,8 +6,8 @@ use std::{
 };
 
 use encoding_rs::UTF_16LE;
-use itertools::Either;
-use tracing::{debug, debug_span};
+use itertools::{Either, Itertools};
+use tracing::{debug, debug_span, error};
 use zerocopy::{FromBytes, I32, LE, U16};
 
 use super::{
@@ -362,6 +362,36 @@ impl<'data> NsisState<'data> {
         )
     }
 
+    /// Simulates every `WriteReg` entry that writes to an uninstall key, whether or not the entry is
+    /// reachable from the simulated code, provided that they all write to the same key.
+    ///
+    /// Installers with a custom UI, such as those using nsNiuniuSkin, may only write their
+    /// uninstall key from functions that are called by the UI, which can't be simulated.
+    pub fn write_uninstall_key(&mut self) {
+        let writes = self
+            .entries
+            .iter()
+            .copied()
+            .filter_map(|entry| match entry {
+                Entry::WriteReg { root, key_name, .. } => {
+                    let key_name = self.get_string(key_name.get());
+                    let is_uninstall_key = Registry::is_uninstall_key(&key_name);
+                    is_uninstall_key.then_some((entry, (root, key_name)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if !writes.iter().map(|(_, key)| key).all_equal() {
+            debug!("Not writing uninstall key as there are multiple uninstall keys");
+            return;
+        }
+
+        for (entry, _) in writes {
+            let _ = entry.execute(self);
+        }
+    }
+
     pub fn get_int(&self, relative_offset: i32) -> i32 {
         self.with_string(relative_offset, parse_int)
     }
@@ -438,6 +468,22 @@ impl<'data> NsisState<'data> {
                 .insert(id, super::ini::IniFile::parse(&bytes));
         }
         Ok(self.ini_files.get_mut(&id).expect("INI file was inserted"))
+    }
+
+    /// Simulates a callback function, ignoring an abort.
+    ///
+    /// Aborting a callback only skips or stays on a page, or cancels the callback's default
+    /// action, so it isn't treated as an error.
+    pub fn execute_callback(&mut self, name: &str, position: i32) {
+        if position < 0 {
+            return;
+        }
+
+        debug!("Simulating code execution for {name} callback");
+        match self.execute_code_segment(position) {
+            Err(EntryError::Abort { .. }) | Ok(..) => {}
+            Err(invalid_entry) => error!(%invalid_entry),
+        }
     }
 
     /// Execute a NSIS code section.
