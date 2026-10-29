@@ -6,7 +6,8 @@ use tracing::warn;
 use winget_types::installer::{Installer, InstallerType};
 
 use super::{
-    super::Installers, AdvancedInstaller, Burn, InstallAware, InstallShield, Nsis, Squirrel,
+    super::Installers, AdvancedInstaller, Burn, IExpress, InstallAware, InstallShield, Nsis,
+    SfxCab, Squirrel,
 };
 use crate::{
     analysis::{
@@ -14,10 +15,12 @@ use crate::{
         installers::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
+            iexpress::IExpressError,
             installaware::InstallAwareError,
             installshield::InstallShieldError,
             nsis::NsisError,
             pe::{PE, VSVersionInfo},
+            sfxcab::SfxCabError,
             squirrel::SquirrelError,
         },
     },
@@ -41,10 +44,12 @@ pub struct Exe {
 pub enum ExeType {
     AdvancedInstaller(AdvancedInstaller),
     Burn(Box<Burn>),
+    IExpress(Box<IExpress>),
     Inno(Box<InnoInner>),
     InstallAware(InstallAware),
     InstallShield(Box<InstallShield>),
     Nsis(Nsis),
+    SfxCab(Box<SfxCab>),
     Squirrel(Squirrel),
     Generic(Box<Installer>),
 }
@@ -180,6 +185,38 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
+        match SfxCab::new(&mut reader, &pe) {
+            Ok(sfxcab) => {
+                return Ok(Self {
+                    r#type: ExeType::SfxCab(Box::new(sfxcab)),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(SfxCabError::NotSfxCabFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match IExpress::new(&mut reader, &pe) {
+            Ok(iexpress) => {
+                return Ok(Self {
+                    r#type: ExeType::IExpress(Box::new(iexpress)),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(IExpressError::NotIExpressFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
         match Squirrel::new(&mut reader, &pe) {
             Ok(squirrel) => {
                 return Ok(Self {
@@ -248,10 +285,12 @@ impl Installers for Exe {
         match &self.r#type {
             ExeType::AdvancedInstaller(advanced) => advanced.installers(),
             ExeType::Burn(burn) => burn.installers(),
+            ExeType::IExpress(iexpress) => iexpress.installers(),
             ExeType::Inno(inno) => inno.installers(),
             ExeType::InstallAware(installaware) => installaware.installers(),
             ExeType::InstallShield(installshield) => installshield.installers(),
             ExeType::Nsis(nsis) => nsis.installers(),
+            ExeType::SfxCab(sfxcab) => sfxcab.installers(),
             ExeType::Squirrel(squirrel) => squirrel.installers(),
             ExeType::Generic(installer) => vec![*installer.clone()],
         }
