@@ -4,7 +4,7 @@ use std::{
 };
 
 use camino::Utf8Path;
-use color_eyre::eyre::{Result, bail};
+use color_eyre::eyre::{Result, WrapErr, bail};
 use winget_types::{
     installer::{Architecture, Installer, InstallerType},
     locale::{Copyright, PackageName, Publisher},
@@ -82,6 +82,9 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
             }
             ValidFileExtensions::Zip => {
                 let mut scoped_zip = Zip::new(reader, font_analysis)?;
+                scoped_zip
+                    .ensure_has_installers(nested_installer_files)
+                    .wrap_err_with(|| format!("Failed to analyze {file_name}"))?;
                 // Updates already declare their payload; helper executables must not prevent
                 // analysis of that payload when an archive has multiple candidates.
                 let matched = scoped_zip.analyze_files_with_metadata(nested_installer_files)?;

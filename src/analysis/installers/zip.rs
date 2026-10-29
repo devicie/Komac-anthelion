@@ -29,6 +29,19 @@ use crate::traits::path::LowercaseExtension;
 const IGNORABLE_FOLDERS: [&str; 2] = ["__MACOSX", "resources"];
 
 #[derive(Debug, Error)]
+pub enum NoNestedInstallersError {
+    #[error("The ZIP doesn't contain any Windows installers")]
+    Empty,
+    #[error(
+        "The ZIP doesn't contain any installers with the same extension as {nested_installer_files:?}. Possible installers: {possible_installer_files:?}"
+    )]
+    ExtensionMismatch {
+        nested_installer_files: Vec<String>,
+        possible_installer_files: Vec<Utf8PathBuf>,
+    },
+}
+
+#[derive(Debug, Error)]
 #[error("{path} is not a valid nested installer file")]
 struct InvalidNestedInstallerError {
     path: Utf8PathBuf,
@@ -182,6 +195,38 @@ impl<R: Read + Seek> Zip<R> {
             possible_installer_files,
             installers,
         })
+    }
+
+    /// Returns an error if the ZIP doesn't contain any Windows installers, or none with the same
+    /// extension as any of the given nested installer files.
+    ///
+    /// This prevents ZIPs for other platforms from being added to a manifest.
+    pub fn ensure_has_installers(
+        &self,
+        nested_installer_files: &[String],
+    ) -> Result<(), NoNestedInstallersError> {
+        if self.possible_installer_files.is_empty() {
+            return Err(NoNestedInstallersError::Empty);
+        }
+
+        let extensions = nested_installer_files
+            .iter()
+            .filter_map(|path| ValidFileExtensions::from_path(Utf8Path::new(path)).ok())
+            .collect::<BTreeSet<_>>();
+
+        if extensions.is_empty()
+            || self.possible_installer_files.iter().any(|path| {
+                ValidFileExtensions::from_path(path)
+                    .is_ok_and(|extension| extensions.contains(&extension))
+            })
+        {
+            Ok(())
+        } else {
+            Err(NoNestedInstallersError::ExtensionMismatch {
+                nested_installer_files: nested_installer_files.to_vec(),
+                possible_installer_files: self.possible_installer_files.clone(),
+            })
+        }
     }
 
     #[cfg(feature = "cli")]
@@ -694,6 +739,55 @@ mod tests {
         assert_eq!(zip.installers[0].r#type, Some(InstallerType::Zip));
         assert_eq!(zip.installers[0].nested_installer_type, None);
         assert!(zip.installers[0].nested_installer_files.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn zip_without_windows_installers_is_rejected() -> Result<()> {
+        // A Linux build of a portable app, as in devicie/Komac#18
+        let zip_bytes = zip_with_files(&[("onehistory", b"\x7fELF"), ("README.md", b"readme")])?;
+
+        let zip = Zip::new(Cursor::new(zip_bytes), FontAnalysis::None)?;
+
+        assert!(matches!(
+            zip.ensure_has_installers(&["onehistory.exe".to_owned()]),
+            Err(NoNestedInstallersError::Empty)
+        ));
+        assert!(matches!(
+            zip.ensure_has_installers(&[]),
+            Err(NoNestedInstallersError::Empty)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn zip_with_different_installer_extension_is_rejected() -> Result<()> {
+        let zip_bytes =
+            zip_with_files(&[("setup.msi", b"not an msi"), ("other.msi", b"not an msi")])?;
+
+        let zip = Zip::new(Cursor::new(zip_bytes), FontAnalysis::None)?;
+
+        assert!(matches!(
+            zip.ensure_has_installers(&["app.exe".to_owned()]),
+            Err(NoNestedInstallersError::ExtensionMismatch { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn zip_with_renamed_installer_is_accepted() -> Result<()> {
+        let zip_bytes = zip_with_files(&[
+            ("app-2.0.exe", b"not an exe"),
+            ("helper.exe", b"not an exe"),
+        ])?;
+
+        let zip = Zip::new(Cursor::new(zip_bytes), FontAnalysis::None)?;
+
+        assert!(
+            zip.ensure_has_installers(&["app-1.0.exe".to_owned()])
+                .is_ok()
+        );
+        assert!(zip.ensure_has_installers(&[]).is_ok());
         Ok(())
     }
 

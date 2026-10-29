@@ -218,6 +218,8 @@ fn analyze_download(
     .wrap_err_with(|| format!("Failed to analyze {file_name}"))?;
 
     let matched = if let Some(zip) = &mut analyzer.zip {
+        zip.ensure_has_installers(nested_installer_files)
+            .wrap_err_with(|| format!("Failed to analyze {file_name}"))?;
         if nested_installer_matches.is_empty() {
             zip.analyze_files_with_metadata(nested_installer_files)
         } else {
