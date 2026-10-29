@@ -5,7 +5,7 @@ use inno::{Inno, InnoInner, error::InnoError};
 use winget_types::installer::{Installer, InstallerType};
 
 use super::{
-    super::Installers, AdvancedInstaller, Burn, IExpress, InstallAware, InstallShield, Nsis,
+    super::Installers, AdvancedInstaller, Burn, IExpress, InstallAware, InstallShield, Nsis, QtIfw,
     SevenZipSfx, SfxCab, Squirrel,
 };
 use crate::{
@@ -19,6 +19,7 @@ use crate::{
             installshield::InstallShieldError,
             nsis::NsisError,
             pe::{PE, VSVersionInfo},
+            qt_ifw::QtIfwError,
             sevenzip_sfx::SevenZipSfxError,
             sfxcab::SfxCabError,
             squirrel::SquirrelError,
@@ -49,6 +50,7 @@ pub enum ExeType {
     InstallAware(InstallAware),
     InstallShield(Box<InstallShield>),
     Nsis(Nsis),
+    QtIfw(Box<QtIfw>),
     SevenZipSfx(Box<SevenZipSfx>),
     SfxCab(Box<SfxCab>),
     Squirrel(Squirrel),
@@ -198,6 +200,22 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
+        match QtIfw::new(&mut reader, &pe) {
+            Ok(qt_ifw) => {
+                return Ok(Self {
+                    r#type: ExeType::QtIfw(Box::new(qt_ifw)),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(QtIfwError::NotQtIfwFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
         match SfxCab::new(&mut reader, &pe) {
             Ok(sfxcab) => {
                 return Ok(Self {
@@ -285,6 +303,7 @@ impl Installers for Exe {
             ExeType::InstallAware(installaware) => installaware.installers(),
             ExeType::InstallShield(installshield) => installshield.installers(),
             ExeType::Nsis(nsis) => nsis.installers(),
+            ExeType::QtIfw(qt_ifw) => qt_ifw.installers(),
             ExeType::SevenZipSfx(sevenzip_sfx) => sevenzip_sfx.installers(),
             ExeType::SfxCab(sfxcab) => sfxcab.installers(),
             ExeType::Squirrel(squirrel) => squirrel.installers(),
