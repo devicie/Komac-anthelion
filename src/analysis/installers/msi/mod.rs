@@ -182,6 +182,28 @@ impl Msi {
             .filter(|version| version.split('.').all(|part| part.parse::<u16>().is_ok()))
     }
 
+    /// Returns the installer for an exe that installs this MSI, such as a self-extractor.
+    pub fn wrapped_installer(&self, switches: Switches) -> Installer {
+        let mut installer = self.installers().swap_remove(0);
+        let msi_type = installer.r#type.replace(InstallerType::Exe);
+        installer.switches = switches;
+        installer.apps_and_features_entries = installer
+            .apps_and_features_entries
+            .iter()
+            .map(|entry| {
+                AppsAndFeaturesEntry::builder()
+                    .maybe_display_name(entry.display_name())
+                    .maybe_publisher(entry.publisher())
+                    .maybe_display_version(entry.display_version().cloned())
+                    .maybe_product_code(entry.product_code())
+                    .maybe_upgrade_code(entry.upgrade_code())
+                    .maybe_installer_type(msi_type)
+                    .build()
+            })
+            .collect();
+        installer
+    }
+
     fn product_code(&self) -> Option<&str> {
         const PRODUCT_CODE: &str = "ProductCode";
 
