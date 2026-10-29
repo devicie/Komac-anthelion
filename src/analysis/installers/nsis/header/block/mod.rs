@@ -100,7 +100,7 @@ impl BlockHeaders {
     }
 
     /// Returns the entries block.
-    fn entries_block<'data>(&self, data: &'data [u8]) -> &'data [u8] {
+    pub fn entries_block<'data>(&self, data: &'data [u8]) -> &'data [u8] {
         self.get(data, BlockType::Entries)
     }
 

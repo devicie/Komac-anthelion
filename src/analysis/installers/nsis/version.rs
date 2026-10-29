@@ -36,6 +36,16 @@ impl NsisVersion {
         Self::new(2, 0)
     }
 
+    /// Jim Park's Unicode fork of NSIS 2, the last release of which was 2.46.5.
+    #[inline]
+    pub const fn park() -> Self {
+        Self {
+            major: 2,
+            minor: 46,
+            park: true,
+        }
+    }
+
     #[inline]
     pub const fn is_v3(self) -> bool {
         self.major >= 3
@@ -86,7 +96,7 @@ impl NsisVersion {
             return None;
         }
 
-        let (version, unicode) = version.rsplit_once('-').unwrap_or((version, ""));
+        let (version, suffix) = version.split_once('-').unwrap_or((version, ""));
 
         let mut parts = version
             .trim_start_matches('v')
@@ -99,7 +109,11 @@ impl NsisVersion {
         Some(Self {
             major,
             minor,
-            park: major == 2 && (45..=46).contains(&minor) && unicode == "Unicode",
+            // Jim Park's fork of NSIS 2 marks its builds as either Unicode or ANSI
+            park: major == 2
+                && suffix
+                    .split('-')
+                    .any(|part| matches!(part, "Unicode" | "ANSI")),
         })
     }
 
@@ -113,6 +127,7 @@ impl NsisVersion {
 
         let mut nsis3_count = 0;
         let mut nsis2_count = 0;
+        let mut park_count = 0;
 
         let codes = if unicode {
             assert_eq!(strings_block.len() % size_of::<u16>(), 0);
@@ -121,29 +136,33 @@ impl NsisVersion {
                 <[U16<LE>]>::ref_from_bytes(strings_block)
                     .unwrap_or_else(|cast_error| unreachable!("{cast_error}"))
                     .array_windows::<2>()
-                    .filter_map(|window| {
-                        (window[0] == U16::ZERO).then(|| window[1].get().try_into().ok())?
-                    }),
+                    .filter(|window| window[0] == U16::ZERO)
+                    .map(|window| window[1].get()),
             )
         } else {
             Either::Right(
                 strings_block
                     .array_windows::<2>()
-                    .filter_map(|window| (window[0] == 0).then_some(window[1])),
+                    .filter_map(|window| (window[0] == 0).then_some(u16::from(window[1]))),
             )
         };
 
         for code in codes {
-            if NsCode::is_code(code, Self::v3()) {
+            if unicode && NsCode::try_from_park(code).is_some() {
+                park_count += 1;
+            } else if NsCode::is_code(code, Self::v3()) {
                 nsis3_count += 1;
             } else if NsCode::is_code(code, Self::v2()) {
                 nsis2_count += 1;
             }
         }
 
-        debug!(nsis3_count, nsis2_count);
+        debug!(nsis3_count, nsis2_count, park_count);
 
-        if nsis3_count >= nsis2_count {
+        // Original NSIS 2 doesn't support Unicode, so Unicode strings are either NSIS 3 or Park
+        if unicode && park_count > nsis3_count {
+            Self::park()
+        } else if nsis3_count >= nsis2_count {
             Self::v3()
         } else {
             Self::v2()
@@ -176,6 +195,7 @@ impl PartialEq<f32> for NsisVersion {
 mod tests {
     use indoc::indoc;
     use rstest::rstest;
+    use zerocopy::IntoBytes;
 
     use super::NsisVersion;
 
@@ -194,6 +214,47 @@ mod tests {
             NsisVersion::from_manifest(MANIFEST).unwrap(),
             NsisVersion::new(3, 9)
         );
+    }
+
+    #[rstest]
+    #[case("Nullsoft Install System v2.46.5-Unicode", NsisVersion::park())]
+    #[case("Nullsoft Install System v2.46-Unicode", NsisVersion::park())]
+    #[case("Nullsoft Install System v2.44-Unicode", NsisVersion { major: 2, minor: 44, park: true })]
+    #[case("Nullsoft Install System v2.46.5-ANSI", NsisVersion::park())]
+    #[case("Nullsoft Install System v2.46.5-Unicode-logging", NsisVersion::park())]
+    #[case("Nullsoft Install System v2.46", NsisVersion::new(2, 46))]
+    #[case("Nullsoft Install System v2.46-7", NsisVersion::new(2, 46))]
+    #[case("Nullsoft Install System v3.0-Unicode", NsisVersion::new(3, 0))]
+    #[case("Nullsoft Install System v3.11", NsisVersion::new(3, 11))]
+    fn version_from_text(#[case] text: &str, #[case] expected: NsisVersion) {
+        assert_eq!(NsisVersion::from_text(text), Some(expected));
+    }
+
+    #[test]
+    fn detect_park() {
+        const STRINGS: [u16; 12] = [
+            0,
+            0xE001,
+            0x8015,
+            0,
+            0xE002,
+            0x8026,
+            0,
+            b'A' as u16,
+            0,
+            0xE003,
+            0x8001,
+            0,
+        ];
+
+        assert_eq!(NsisVersion::detect(STRINGS.as_bytes()), NsisVersion::park());
+    }
+
+    #[test]
+    fn detect_nsis_3_unicode() {
+        const STRINGS: [u16; 8] = [0, 3, 0x8095, 0, 2, 0x8026, 0, 0];
+
+        assert_eq!(NsisVersion::detect(STRINGS.as_bytes()), NsisVersion::v3());
     }
 
     #[test]
