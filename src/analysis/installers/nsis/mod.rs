@@ -9,6 +9,7 @@ mod header;
 mod ini;
 mod int_fmt;
 mod language;
+mod page;
 mod registry;
 mod section;
 mod state;
@@ -159,6 +160,26 @@ impl Nsis {
                     outcome = Outcome::Incomplete;
                 }
                 _ => {}
+            }
+        }
+
+        // Installers with a custom UI, such as those using nsNiuniuSkin, can install from the UI
+        // instead of from their sections, which are then empty. GUI callbacks aren't called in
+        // silent installs, so they're only simulated for these installers, where they may set the
+        // install directory.
+        if matches!(outcome, Outcome::Ready)
+            && header
+                .blocks()
+                .sections(&decompressed_data)
+                .all(|section| section.code_size() == 0)
+        {
+            // https://nsis.sourceforge.io/Reference/.onGUIInit
+            state.execute_callback(".onGUIInit", header.code_on_gui_init());
+
+            // Leave callbacks aren't simulated as they validate input from the page's controls
+            for (index, page) in header.blocks().pages(&decompressed_data).enumerate() {
+                state.execute_callback(&format!("page {index} pre"), page.pre_function());
+                state.execute_callback(&format!("page {index} show"), page.show_function());
             }
         }
 

@@ -6,7 +6,7 @@ use std::{
 
 use encoding_rs::UTF_16LE;
 use itertools::{Either, Itertools};
-use tracing::{debug, debug_span};
+use tracing::{debug, debug_span, error};
 use zerocopy::{FromBytes, I32, LE, U16};
 
 use super::{
@@ -375,6 +375,22 @@ impl<'data> NsisState<'data> {
                 .insert(id, super::ini::IniFile::parse(&bytes));
         }
         Ok(self.ini_files.get_mut(&id).expect("INI file was inserted"))
+    }
+
+    /// Simulates a callback function, ignoring an abort.
+    ///
+    /// Aborting a callback only skips or stays on a page, or cancels the callback's default
+    /// action, so it isn't treated as an error.
+    pub fn execute_callback(&mut self, name: &str, position: i32) {
+        if position < 0 {
+            return;
+        }
+
+        debug!("Simulating code execution for {name} callback");
+        match self.execute_code_segment(position) {
+            Err(EntryError::Abort { .. }) | Ok(..) => {}
+            Err(invalid_entry) => error!(%invalid_entry),
+        }
     }
 
     /// Execute a NSIS code section.
