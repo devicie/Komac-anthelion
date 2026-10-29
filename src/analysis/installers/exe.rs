@@ -6,7 +6,7 @@ use winget_types::installer::{Installer, InstallerType};
 
 use super::{
     super::Installers, AdvancedInstaller, Burn, IExpress, InstallAware, InstallShield, Nsis,
-    SfxCab, Squirrel,
+    SevenZipSfx, SfxCab, Squirrel,
 };
 use crate::{
     analysis::{
@@ -19,6 +19,7 @@ use crate::{
             installshield::InstallShieldError,
             nsis::NsisError,
             pe::{PE, VSVersionInfo},
+            sevenzip_sfx::SevenZipSfxError,
             sfxcab::SfxCabError,
             squirrel::SquirrelError,
         },
@@ -48,6 +49,7 @@ pub enum ExeType {
     InstallAware(InstallAware),
     InstallShield(Box<InstallShield>),
     Nsis(Nsis),
+    SevenZipSfx(Box<SevenZipSfx>),
     SfxCab(Box<SfxCab>),
     Squirrel(Squirrel),
     Generic(Box<Installer>),
@@ -145,6 +147,22 @@ impl Exe {
                 });
             }
             Err(InstallAwareError::NotInstallAwareFile) => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match SevenZipSfx::new(&mut reader, &pe) {
+            Ok(sevenzip_sfx) => {
+                return Ok(Self {
+                    r#type: ExeType::SevenZipSfx(Box::new(sevenzip_sfx)),
+                    legal_copyright,
+                    product_name,
+                    company_name,
+                    file_version,
+                    product_version,
+                    pe_info,
+                });
+            }
+            Err(SevenZipSfxError::NotSevenZipSfxFile) => {}
             Err(error) => return Err(error.into()),
         }
 
@@ -267,6 +285,7 @@ impl Installers for Exe {
             ExeType::InstallAware(installaware) => installaware.installers(),
             ExeType::InstallShield(installshield) => installshield.installers(),
             ExeType::Nsis(nsis) => nsis.installers(),
+            ExeType::SevenZipSfx(sevenzip_sfx) => sevenzip_sfx.installers(),
             ExeType::SfxCab(sfxcab) => sfxcab.installers(),
             ExeType::Squirrel(squirrel) => squirrel.installers(),
             ExeType::Generic(installer) => vec![*installer.clone()],
