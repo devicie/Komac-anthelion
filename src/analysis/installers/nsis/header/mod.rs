@@ -326,6 +326,11 @@ impl Header {
     }
 
     #[inline]
+    pub const fn code_on_gui_init(&self) -> i32 {
+        self.code_on_gui_init.get()
+    }
+
+    #[inline]
     pub const fn code_on_inst_success(&self) -> i32 {
         self.code_on_inst_success.get()
     }

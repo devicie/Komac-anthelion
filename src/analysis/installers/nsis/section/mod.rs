@@ -28,6 +28,12 @@ impl Section {
     pub const fn code_offset(&self) -> i32 {
         self.code.get()
     }
+
+    /// Returns the number of entries in the section's code.
+    #[inline]
+    pub const fn code_size(&self) -> i32 {
+        self.code_size.get()
+    }
 }
 
 impl fmt::Debug for Section {

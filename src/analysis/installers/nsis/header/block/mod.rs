@@ -6,7 +6,9 @@ use strum::{EnumCount, IntoEnumIterator};
 pub use r#type::BlockType;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, TryFromBytes, U32, U64};
 
-use super::super::{Entry, NsisError, language::table::LanguageTable, section::Section};
+use super::super::{
+    Entry, NsisError, language::table::LanguageTable, page::Page, section::Section,
+};
 use crate::read::ReadBytesExt;
 
 #[derive(Clone, Copy, Default, FromBytes, KnownLayout, Immutable)]
@@ -84,6 +86,19 @@ impl BlockHeaders {
     /// Returns the pages block.
     pub fn pages_block<'data>(&self, data: &'data [u8]) -> &'data [u8] {
         self.get(data, BlockType::Pages)
+    }
+
+    /// Returns an iterator of [`Page`] in the pages block.
+    pub fn pages<'data>(&self, data: &'data [u8]) -> impl Iterator<Item = &'data Page> {
+        let pages = self.pages_block(data);
+        let page_size = pages
+            .len()
+            .checked_div(self[BlockType::Pages].num() as usize)
+            .filter(|&page_size| page_size != 0);
+        page_size
+            .into_iter()
+            .flat_map(move |page_size| pages.chunks_exact(page_size))
+            .flat_map(Page::ref_from_bytes)
     }
 
     /// Returns the sections block.
