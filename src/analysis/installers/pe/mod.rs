@@ -24,7 +24,10 @@ pub use vs_version_info::VSVersionInfo;
 use crate::{
     analysis::installers::pe::{
         optional_header::DataDirectory,
-        resource::{ImageResourceDataEntry, ResourceDirectory, ResourceIter, SectionReader},
+        resource::{
+            IdOrName, ImageResourceDataEntry, ResourceDirectory, ResourceIter, ResourceType,
+            SectionReader,
+        },
     },
     read::ReadBytesExt,
 };
@@ -242,6 +245,71 @@ impl PE {
         manifest_reader.read_to_string(&mut manifest)?;
 
         Ok(manifest)
+    }
+
+    /// Returns a reader of the first language of the named `RT_RCDATA` resource.
+    pub fn find_rc_data_by_name<R>(&self, mut reader: R, name: &str) -> io::Result<SectionReader<R>>
+    where
+        R: Read + Seek,
+    {
+        let resource_table = self
+            .resource_table()
+            .ok_or_else(|| Error::other("No PE resource table found"))?;
+
+        // Get the actual file offset of the resource directory section
+        let resource_directory_offset = resource_table.file_offset(&self.section_table)?;
+
+        let section_reader = SectionReader::new(
+            &mut reader,
+            resource_directory_offset.into(),
+            resource_table.size().into(),
+        )?;
+
+        let mut resource_directory = ResourceDirectory::new(section_reader)?;
+
+        resource_directory.navigate_to_rc_data()?;
+
+        let directory = resource_directory
+            .navigate_to_directory_table_by_name(name)?
+            .id_entries()
+            .next()
+            .ok_or_else(|| Error::other(format!("No {name} resource found")))?;
+
+        let data_entry_offset = directory.file_offset(resource_directory_offset);
+        reader.seek(SeekFrom::Start(data_entry_offset.into()))?;
+
+        let data_entry = reader.read_t::<ImageResourceDataEntry>()?;
+        let offset = self
+            .section_table
+            .to_file_offset(data_entry.offset_to_data())?;
+
+        SectionReader::new(reader, offset.into(), data_entry.size().into())
+    }
+
+    /// Returns the `VS_VERSION_INFO` resources in every language.
+    pub fn vs_version_infos<R>(&self, mut reader: R) -> io::Result<Vec<Vec<u8>>>
+    where
+        R: Read + Seek,
+    {
+        let version_resources = self
+            .resources(&mut reader)?
+            .filter(|resource| *resource.id_or_name() == IdOrName::Id(ResourceType::Version.id()))
+            .map(|resource| (resource.offset_to_data(), resource.size()))
+            .collect::<Vec<_>>();
+
+        version_resources
+            .into_iter()
+            .map(|(offset_to_data, size)| {
+                let offset = self.section_table.to_file_offset(offset_to_data)?;
+                reader.seek(SeekFrom::Start(offset.into()))?;
+                let mut version_info = Vec::with_capacity(size as usize);
+                reader
+                    .by_ref()
+                    .take(size.into())
+                    .read_to_end(&mut version_info)?;
+                Ok(version_info)
+            })
+            .collect()
     }
 
     #[inline]
