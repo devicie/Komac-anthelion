@@ -1,3 +1,4 @@
+pub mod cabinet;
 mod lzma_stream_header;
 pub use lzma_stream_header::LzmaStreamHeader;
 
