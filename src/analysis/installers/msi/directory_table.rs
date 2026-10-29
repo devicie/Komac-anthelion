@@ -79,30 +79,44 @@ impl DirectoryTable {
         const DIRECTORY_PARENT: &str = "Directory_Parent";
         const DEFAULT_DIR: &str = "DefaultDir";
 
-        Ok(Self(
-            msi.select_rows(Select::table(DIRECTORY))?
-                .filter_map(|row| {
-                    match (
-                        row[DIRECTORY].as_str(),
-                        row[DIRECTORY_PARENT].as_str(),
-                        row[DEFAULT_DIR].as_str().map(|default_dir| {
-                            default_dir
-                                .split_once('|')
-                                .map_or(default_dir, |(_, long_dir)| long_dir)
-                        }),
-                    ) {
-                        (Some(directory), parent, Some(default)) => Some((
-                            directory.to_owned(),
-                            (
-                                parent.map(str::to_owned),
-                                expand_properties(default, property_table).into_owned(),
-                            ),
-                        )),
-                        _ => None,
-                    }
-                })
-                .collect::<IndexMap<String, (Option<String>, String)>>(),
-        ))
+        let mut directories = msi
+            .select_rows(Select::table(DIRECTORY))?
+            .filter_map(|row| {
+                match (
+                    row[DIRECTORY].as_str(),
+                    row[DIRECTORY_PARENT].as_str(),
+                    row[DEFAULT_DIR].as_str().map(target_name),
+                ) {
+                    (Some(directory), parent, Some(default)) => Some((
+                        directory.to_owned(),
+                        (
+                            parent.map(str::to_owned),
+                            expand_properties(default, property_table).into_owned(),
+                        ),
+                    )),
+                    _ => None,
+                }
+            })
+            .collect::<IndexMap<String, (Option<String>, String)>>();
+
+        // Advanced Installer names its install directory after its identifier, such as
+        // `APPDIR:.`, and sets it with a custom action instead
+        for (directory, value) in directory_custom_actions(msi)? {
+            let Some((parent, default_dir)) = directories.get_mut(&directory) else {
+                continue;
+            };
+
+            if *default_dir != directory {
+                continue;
+            }
+
+            if let Some(path) = expand_formatted_path(&value, property_table) {
+                *parent = Some(TARGET_DIR.to_owned());
+                *default_dir = path;
+            }
+        }
+
+        Ok(Self(directories))
     }
 
     /// Constructs a path from the root directory to the target subdirectory based on the directory
@@ -122,7 +136,10 @@ impl DirectoryTable {
         if let Some((Some(parent), default_dir)) = self.0.get(current_dir)
             && let Some(mut path) = self.build_directory(parent, target_dir)
         {
-            path.push(get_property_relative_path(current_dir).unwrap_or(default_dir));
+            let name = get_property_relative_path(current_dir).unwrap_or(default_dir);
+            if name != "." {
+                path.push(name);
+            }
             return Some(path);
         }
 
@@ -169,6 +186,98 @@ impl<'a> FromIterator<(&'a str, Option<&'a str>, &'a str)> for DirectoryTable {
                 .collect(),
         )
     }
+}
+
+const TARGET_DIR: &str = "TARGETDIR";
+
+/// Returns the long target directory name of a `DefaultDir` value, which has the format
+/// `[targetShort|]targetLong[:[sourceShort|]sourceLong]`. A name of `.` means the parent directory.
+///
+/// <https://learn.microsoft.com/windows/win32/msi/defaultdir>
+fn target_name(default_dir: &str) -> &str {
+    let target = default_dir
+        .split_once(':')
+        .map_or(default_dir, |(target, _source)| target);
+    target.split_once('|').map_or(target, |(_short, long)| long)
+}
+
+/// Returns the values that custom actions set directories to, in the order they're executed.
+///
+/// These are type 35 (Directory) and type 51 (Property) custom actions, whose source is the
+/// directory and whose target is the formatted value.
+///
+/// <https://learn.microsoft.com/windows/win32/msi/custom-action-type-35>
+fn directory_custom_actions<R: Read + Seek>(
+    msi: &mut Package<R>,
+) -> io::Result<Vec<(String, String)>> {
+    const CUSTOM_ACTION: &str = "CustomAction";
+    const INSTALL_EXECUTE_SEQUENCE: &str = "InstallExecuteSequence";
+    const BASE_TYPE_MASK: i32 = 0x3F;
+    const DIRECTORY_TYPE: i32 = 35;
+    const PROPERTY_TYPE: i32 = 51;
+
+    if !msi.has_table(CUSTOM_ACTION) {
+        return Ok(Vec::new());
+    }
+
+    let sequence = if msi.has_table(INSTALL_EXECUTE_SEQUENCE) {
+        msi.select_rows(Select::table(INSTALL_EXECUTE_SEQUENCE))?
+            .filter_map(|row| {
+                Some((
+                    row["Action"].as_str()?.to_owned(),
+                    row["Sequence"].as_int()?,
+                ))
+            })
+            .collect::<IndexMap<_, _>>()
+    } else {
+        IndexMap::new()
+    };
+
+    let mut custom_actions = msi
+        .select_rows(Select::table(CUSTOM_ACTION))?
+        .filter_map(|row| {
+            let r#type = row["Type"].as_int()? & BASE_TYPE_MASK;
+            (r#type == DIRECTORY_TYPE || r#type == PROPERTY_TYPE).then(|| {
+                Some((
+                    row["Action"].as_str()?.to_owned(),
+                    row["Source"].as_str()?.to_owned(),
+                    row["Target"].as_str()?.to_owned(),
+                ))
+            })?
+        })
+        .collect::<Vec<_>>();
+
+    // Unsequenced custom actions run when they're called, so they're sorted last
+    custom_actions.sort_by_key(|(action, ..)| sequence.get(action).copied().unwrap_or(i32::MAX));
+
+    Ok(custom_actions
+        .into_iter()
+        .map(|(_action, source, target)| (source, target))
+        .collect())
+}
+
+/// Expands a formatted path, such as `[ProgramFiles64Folder][Manufacturer]\[ProductName]`,
+/// returning [`None`] if it references a property that isn't known.
+fn expand_formatted_path(value: &str, property_table: &PropertyTable) -> Option<String> {
+    let mut path = String::new();
+    let mut rest = value;
+
+    while let Some(start) = rest.find('[') {
+        path.push_str(&rest[..start]);
+        let end = start + rest[start..].find(']')?;
+        let property = &rest[start + 1..end];
+        if let Some(folder) = get_property_relative_path(property) {
+            // Folder properties end with a path separator
+            path.push_str(folder);
+            path.push('\\');
+        } else {
+            path.push_str(property_table.get(property)?);
+        }
+        rest = &rest[end + 1..];
+    }
+    path.push_str(rest);
+
+    Some(path.trim_end_matches('\\').to_owned())
 }
 
 /// Expands `[Property]` references in a directory name, such as the `[ApplicationFolderName]` that
@@ -219,7 +328,37 @@ pub fn get_property_relative_path(property: &str) -> Option<&str> {
 mod tests {
     use rstest::rstest;
 
-    use super::{PropertyTable, expand_properties};
+    use super::{PropertyTable, expand_formatted_path, expand_properties, target_name};
+
+    #[rstest]
+    #[case::long_name("PROGRA~1|ProgramFiles", "ProgramFiles")]
+    #[case::target_and_source("APPDIR:.", "APPDIR")]
+    #[case::short_long_target_and_source("MYAPP~1|My App:Source", "My App")]
+    #[case::parent("SourceDir", "SourceDir")]
+    #[case::dot(".", ".")]
+    fn target_name_of_default_dir(#[case] default_dir: &str, #[case] expected: &str) {
+        assert_eq!(target_name(default_dir), expected);
+    }
+
+    #[rstest]
+    #[case::advanced_installer(
+        r"[ProgramFiles64Folder][Manufacturer]\[ProductName]",
+        Some(r"%ProgramFiles%\Kuta Software LLC\Infinite Calculus")
+    )]
+    #[case::trailing_folder("[LocalAppDataFolder]", Some("%LocalAppData%"))]
+    #[case::unknown_property(r"[ProgramFilesFolder][Unknown]", None)]
+    #[case::unclosed_bracket(r"[ProgramFilesFolder", None)]
+    fn expands_formatted_path(#[case] value: &str, #[case] expected: Option<&str>) {
+        let property_table = PropertyTable::from_iter([
+            ("Manufacturer", "Kuta Software LLC"),
+            ("ProductName", "Infinite Calculus"),
+        ]);
+
+        assert_eq!(
+            expand_formatted_path(value, &property_table).as_deref(),
+            expected
+        );
+    }
 
     #[rstest]
     #[case::no_reference("MyApp", "MyApp")]
