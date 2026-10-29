@@ -181,6 +181,11 @@ impl<'a> Buffer<'a> {
     }
 }
 
+/// Returns `true` if the lines differ from the saved content.
+fn is_modified(content: &str, lines: &[String]) -> bool {
+    !content.lines().eq(lines.iter().map(String::as_str))
+}
+
 pub struct Editor<'a> {
     current: usize,
     buffers: Vec<Buffer<'a>>,
@@ -380,18 +385,10 @@ impl<'a> Editor<'a> {
                     }
                     input => {
                         let buffer = &mut self.buffers[self.current];
-                        buffer.modified =
-                            buffer.content.lines().enumerate().any(|(index, line)| {
-                                if let Some(textarea_line) = buffer.textarea.lines().get(index) {
-                                    if textarea_line != line {
-                                        return true;
-                                    }
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
+                        // The input must be applied first, as a single input can change the
+                        // content, such as deleting a selection
                         buffer.textarea.input(input);
+                        buffer.modified = is_modified(buffer.content, buffer.textarea.lines());
                     }
                 }
             }
@@ -404,5 +401,27 @@ impl<'a> Editor<'a> {
 impl Drop for Editor<'_> {
     fn drop(&mut self) {
         ratatui::restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::is_modified;
+
+    #[rstest]
+    #[case::unchanged(&["a", "b"], false)]
+    #[case::changed_line(&["a", "c"], true)]
+    #[case::deleted_selection(&["a"], true)]
+    #[case::added_line(&["a", "b", "c"], true)]
+    #[case::emptied(&[""], true)]
+    fn detects_modifications(#[case] lines: &[&str], #[case] expected: bool) {
+        let lines = lines
+            .iter()
+            .map(|&line| line.to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(is_modified("a\r\nb\r\n", &lines), expected);
     }
 }
