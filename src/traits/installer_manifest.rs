@@ -106,6 +106,15 @@ impl InstallerManifestExt for InstallerManifest {
 
         let matched_installers = match_installers(&previous_installers, new_installers);
         let unmatched_installers = unmatched_installers(&matched_installers, new_installers);
+
+        // New ZIP installers that analysis couldn't choose a nested installer for use the same
+        // nested installer files as the existing ZIP installers
+        let sibling_nested_files = previous_installers
+            .iter()
+            .find(|installer| !installer.nested_installer_files.is_empty())
+            .map(|installer| installer.nested_installer_files.clone())
+            .unwrap_or_default();
+
         self.installers = matched_installers
             .into_iter()
             .map(|(mut previous_installer, new_installer)| {
@@ -133,11 +142,20 @@ impl InstallerManifestExt for InstallerManifest {
 
                 installer
             })
-            .chain(
-                unmatched_installers
-                    .into_iter()
-                    .map(|installer| inherit_installer_properties(installer, self)),
-            )
+            .chain(unmatched_installers.into_iter().map(|installer| {
+                let mut installer = inherit_installer_properties(installer, self);
+                if installer.r#type == Some(InstallerType::Zip)
+                    && installer.nested_installer_files.is_empty()
+                {
+                    let possible_installer_files = possible_installer_files
+                        .get(&installer.url)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    installer.nested_installer_files =
+                        fix_relative_paths(sibling_nested_files.clone(), possible_installer_files);
+                }
+                installer
+            }))
             .collect();
     }
 }
@@ -719,6 +737,75 @@ mod tests {
                 .iter()
                 .all(|installer| installers.contains(installer))
         );
+    }
+
+    #[test]
+    fn new_zip_installers_use_existing_nested_installer_files() {
+        // devicie/Komac#10 and devicie/Komac#20: when a ZIP has multiple possible installers,
+        // analysis can't choose one, so a new ZIP installer would have no nested installer
+        let previous_installer = |architecture, file| Installer {
+            architecture,
+            r#type: Some(InstallerType::Zip),
+            nested_installer_type: Some(NestedInstallerType::Portable),
+            nested_installer_files: BTreeSet::from([NestedInstallerFiles {
+                relative_file_path: "app.exe".into(),
+                portable_command_alias: None,
+            }]),
+            url: format!("https://example.com/app-1-{file}.zip")
+                .parse()
+                .unwrap(),
+            ..Installer::default()
+        };
+        let mut manifest = InstallerManifest {
+            installers: vec![
+                previous_installer(Architecture::X86, "x86"),
+                previous_installer(Architecture::X64, "x64"),
+            ],
+            ..InstallerManifest::default()
+        };
+        let new_installer = |architecture, file| Installer {
+            architecture,
+            r#type: Some(InstallerType::Zip),
+            url: format!("https://example.com/app-2-{file}.zip")
+                .parse()
+                .unwrap(),
+            ..Installer::default()
+        };
+        let new_installers = [
+            new_installer(Architecture::X86, "x86"),
+            new_installer(Architecture::X64, "x64"),
+            new_installer(Architecture::Arm64, "arm64"),
+        ];
+        let candidates = new_installers
+            .iter()
+            .map(|installer| {
+                (
+                    installer.url.clone(),
+                    vec!["app.exe".into(), "helper.exe".into()],
+                )
+            })
+            .collect();
+
+        manifest.update_installers(&new_installers, &candidates);
+
+        assert_eq!(manifest.installers.len(), 3);
+        assert!(
+            manifest
+                .installers
+                .iter()
+                .any(|installer| installer.architecture == Architecture::Arm64)
+        );
+        for installer in &manifest.installers {
+            assert_eq!(
+                installer.nested_installer_files,
+                BTreeSet::from([NestedInstallerFiles {
+                    relative_file_path: "app.exe".into(),
+                    portable_command_alias: None,
+                }]),
+                "{:?}",
+                installer.architecture
+            );
+        }
     }
 
     #[test]
