@@ -68,6 +68,15 @@ impl Registry {
         })
     }
 
+    /// Returns whether the key is an immediate child of the uninstall key.
+    pub fn is_uninstall_key(key: &str) -> bool {
+        key.trim_end_matches('\\')
+            .rsplit_once('\\')
+            .is_some_and(|(parent, product_code)| {
+                parent.eq_ignore_ascii_case(CURRENT_VERSION_UNINSTALL) && !product_code.is_empty()
+            })
+    }
+
     pub fn product_code(&self) -> Option<&str> {
         self.uninstall_entries().next().map(|(_, code, _)| code)
     }
@@ -307,6 +316,19 @@ impl fmt::Display for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Milesight CMS 2.4",
+        true
+    )]
+    #[case(r"software\microsoft\windows\currentversion\uninstall\App\", true)]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\", false)]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\Uninstall", false)]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\App Paths\app.exe", false)]
+    fn is_uninstall_key(#[case] key: &str, #[case] expected: bool) {
+        assert_eq!(Registry::is_uninstall_key(key), expected);
+    }
 
     #[test]
     fn enumerates_immediate_subkeys_and_value_names() {
