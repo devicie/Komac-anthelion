@@ -31,7 +31,8 @@ use crate::{
 
 const ORIGINAL_FILENAME: &str = "OriginalFilename";
 const FILE_DESCRIPTION: &str = "FileDescription";
-const BASIC_INSTALLER_KEYWORDS: [&str; 4] = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+const BASIC_INSTALLER_KEYWORDS: [&str; 5] =
+    ["installer", "setup", "bootstrapper", "7zs.sfx", "7zsd.sfx"];
 
 /// The original file name of the self-extractor used by the .NET Framework 4.5 and later setups,
 /// which runs the setup chainer.
@@ -330,13 +331,7 @@ impl Exe {
                         let original_filename = table.swap_remove(ORIGINAL_FILENAME);
                         let file_description = table.swap_remove(FILE_DESCRIPTION);
 
-                        BASIC_INSTALLER_KEYWORDS.iter().any(|keyword| {
-                            original_filename.is_some_and(|filename| {
-                                filename.to_ascii_lowercase().contains(keyword)
-                            }) || file_description.is_some_and(|description| {
-                                description.to_ascii_lowercase().contains(keyword)
-                            })
-                        })
+                        is_installer_name(original_filename, file_description)
                     }) {
                     Some(InstallerType::Exe)
                 } else {
@@ -352,6 +347,26 @@ impl Exe {
             pe_info,
         })
     }
+}
+
+/// Returns `true` if the original file name or file description suggests that the executable is
+/// an installer.
+fn is_installer_name(original_filename: Option<&str>, file_description: Option<&str>) -> bool {
+    let contains_keyword = |value: &str| {
+        let value = value.to_ascii_lowercase();
+        BASIC_INSTALLER_KEYWORDS
+            .iter()
+            .any(|keyword| value.contains(keyword))
+    };
+
+    original_filename.is_some_and(|filename| {
+        contains_keyword(filename)
+            || filename
+                .rsplit_once('.')
+                .map_or(filename, |(stem, _extension)| stem)
+                .to_ascii_lowercase()
+                .ends_with("install")
+    }) || file_description.is_some_and(contains_keyword)
 }
 
 /// Returns `true` if any version info of the executable is that of .NET's Box Stub.
