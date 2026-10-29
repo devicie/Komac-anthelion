@@ -44,25 +44,28 @@ impl Registry {
         Self(BTreeMap::new())
     }
 
+    /// Returns the product code if the key is a
+    /// `Software\Microsoft\Windows\CurrentVersion\Uninstall\{PRODUCT_CODE}` key.
+    pub fn uninstall_product_code(key: &str) -> Option<&str> {
+        key.rsplit_once('\\').and_then(|(parent, product_code)| {
+            (parent == CURRENT_VERSION_UNINSTALL && !product_code.is_empty())
+                .then_some(product_code)
+        })
+    }
+
     /// Finds the first `Software\Microsoft\Windows\CurrentVersion\Uninstall\{PRODUCT_CODE}` key
     /// under any root and extracts the product code from it.
     pub fn product_code(&self) -> Option<&str> {
         self.0.values().find_map(|keys| {
-            keys.keys().find_map(|key| {
-                key.rsplit_once('\\').and_then(|(parent, product_code)| {
-                    (parent == CURRENT_VERSION_UNINSTALL).then_some(product_code)
-                })
-            })
+            keys.keys()
+                .find_map(|key| Self::uninstall_product_code(key))
         })
     }
 
     pub fn product_code_scope(&self) -> Option<Scope> {
         self.0.iter().find_map(|(root, keys)| {
             keys.keys()
-                .any(|key| {
-                    key.rsplit_once('\\')
-                        .is_some_and(|(parent, _product_code)| parent == CURRENT_VERSION_UNINSTALL)
-                })
+                .any(|key| Self::uninstall_product_code(key).is_some())
                 .then(|| match root {
                     root if root.is_current_user() => Some(Scope::User),
                     root if root.is_local_machine() => Some(Scope::Machine),
@@ -166,5 +169,24 @@ impl fmt::Display for Registry {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::Registry;
+
+    #[rstest]
+    #[case(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Milesight CMS 2.4",
+        Some("Milesight CMS 2.4")
+    )]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\", None)]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\Uninstall", None)]
+    #[case(r"Software\Microsoft\Windows\CurrentVersion\App Paths\app.exe", None)]
+    fn uninstall_product_code(#[case] key: &str, #[case] expected: Option<&str>) {
+        assert_eq!(Registry::uninstall_product_code(key), expected);
     }
 }
