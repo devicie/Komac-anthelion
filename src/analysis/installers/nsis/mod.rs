@@ -216,6 +216,13 @@ impl Nsis {
             }
         }
 
+        // Installers with a custom UI may only write their uninstall key from UI callbacks. Only
+        // fall back to those writes when installation otherwise succeeded.
+        if matches!(outcome, Outcome::Success) && state.registry.product_code().is_none() {
+            debug!("Writing uninstall key from unreachable entries");
+            state.write_uninstall_key();
+        }
+
         let mut architecture =
             Option::from(architecture).filter(|&architecture| architecture != Architecture::X86);
 
