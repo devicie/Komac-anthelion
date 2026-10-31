@@ -262,7 +262,7 @@ impl Nsis {
                                     let header = decoder.read_t::<LzmaStreamHeader>().ok()?;
                                     Decoder::new_lzma1(decoder, header).ok()?
                                 }
-                                Compression::BZip2 => return None,
+                                Compression::Lzma2 | Compression::BZip2 => return None,
                                 Compression::Zlib => {
                                     Decoder::Zlib(ZlibDecoder::new_with_decompress(
                                         decoder,

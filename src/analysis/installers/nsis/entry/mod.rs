@@ -783,6 +783,9 @@ impl Entry {
                                 }
                             }
                         };
+                    } else {
+                        // A negative start position before the start of the string copies nothing
+                        result = Cow::Borrowed("");
                     }
                 }
 

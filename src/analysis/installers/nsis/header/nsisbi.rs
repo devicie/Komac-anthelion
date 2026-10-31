@@ -94,7 +94,7 @@ impl<R: Read> Decoder<R> {
                         io::Error::new(io::ErrorKind::InvalidData, error.to_string())
                     })?;
             }
-            Compression::Zlib | Compression::None => {
+            Compression::Zlib | Compression::Lzma2 | Compression::None => {
                 DeflateDecoder::new(compressed.as_slice())
                     .take(MAX_BLOCK_DATA_SIZE as u64)
                     .read_to_end(&mut decompressed)?;
