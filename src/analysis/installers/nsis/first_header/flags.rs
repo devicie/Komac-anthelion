@@ -11,10 +11,8 @@ bitflags! {
         const SILENT = (1u32 << 1).to_le();
         const NO_CRC = (1u32 << 2).to_le();
         const FORCE_CRC = (1u32 << 3).to_le();
-        // NSISBI fork flags:
-        const BI_LONG_OFFSET = (1u32 << 4).to_le();
-        const BI_EXTERNAL_FILE_SUPPORT = (1u32 << 5).to_le();
-        const BI_EXTERNAL_FILE = (1u32 << 6).to_le();
-        const BI_IS_STUB_INSTALLER = (1u32 << 7).to_le();
+        /// Set by every nsisbi version (`FH_FLAGS_LARGE_DATABLOCK_OFFSET` before 3.12.1,
+        /// `FH_FLAGS_NSISBI_INSTALL` after). The nsisbi flags after it differ between versions.
+        const NSISBI = (1u32 << 4).to_le();
     }
 }

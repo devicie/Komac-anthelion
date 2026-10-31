@@ -4,6 +4,7 @@ mod file_system;
 mod first_header;
 mod header;
 mod language;
+mod nsisbi;
 mod page;
 mod park;
 mod registry;
@@ -76,9 +77,11 @@ impl Nsis {
         let (first_header_offset, first_header) =
             FirstHeader::find(&mut reader, overlay_offset).map_err(|_| NsisError::NotNsisFile)?;
 
-        let data_offset = first_header_offset + size_of::<FirstHeader>() as u64;
+        let data_offset = first_header_offset + first_header.size();
 
         debug!(first_header_offset, ?first_header, data_offset);
+
+        reader.seek(SeekFrom::Start(data_offset))?;
 
         let Decompressed {
             data: decompressed_data,
@@ -94,7 +97,13 @@ impl Nsis {
 
         debug!(?header);
 
-        let mut state = NsisState::new(&decompressed_data, &header, manifest.as_deref())?;
+        let mut state = NsisState::new(
+            &decompressed_data,
+            &header,
+            manifest.as_deref(),
+            architecture.is_64_bit(),
+            first_header.is_nsisbi(),
+        )?;
 
         // https://nsis.sourceforge.io/Reference/.onInit
         if header.code_on_init() != -1 {
@@ -190,6 +199,11 @@ impl Nsis {
                     .then_some(Architecture::X64)
             })
             .or_else(|| {
+                // nsisbi uses 64-bit file offsets and compresses files in blocks
+                if first_header.is_nsisbi() {
+                    return None;
+                }
+
                 let app_name = state.get_string(state.language_table.name_offset()?);
                 state
                     .file_system

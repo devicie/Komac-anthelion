@@ -3,6 +3,7 @@ mod compression;
 mod decoder;
 pub mod flags;
 pub(super) mod nsis_bzip2;
+mod nsisbi;
 
 use std::{
     fmt, io,
@@ -13,7 +14,7 @@ pub use compression::Compression;
 pub use decoder::Decoder;
 use flate2::{Decompress, read::ZlibDecoder};
 use tracing::debug;
-use zerocopy::{FromBytes, I32, LE};
+use zerocopy::{FromBytes, I32, LE, U64};
 
 use super::{FirstHeader, NsisError};
 use crate::{
@@ -192,6 +193,10 @@ impl Header {
         mut reader: R,
         first_header: &FirstHeader,
     ) -> io::Result<Decompressed<R>> {
+        if first_header.is_nsisbi() {
+            return Self::decompress_nsisbi(reader, first_header);
+        }
+
         /*
           XX XX XX XX             XX XX XX XX == FirstHeader.HeaderSize, nonsolid, uncompressed
           5D 00 00 dd dd 00       solid LZMA
@@ -284,6 +289,58 @@ impl Header {
             data: decompressed_data,
             is_solid,
             non_solid_start_offset: compressed_header_size,
+            compression,
+            decoder,
+        })
+    }
+
+    /// Decompresses the header of an nsisbi installer, which prefixes data with 64-bit sizes and
+    /// compresses it in blocks.
+    ///
+    /// <https://sourceforge.net/projects/nsisbi/>
+    fn decompress_nsisbi<R: Read + Seek>(
+        mut reader: R,
+        first_header: &FirstHeader,
+    ) -> io::Result<Decompressed<R>> {
+        const IS_COMPRESSED_MASK: u64 = 1 << 63;
+
+        let size = reader.read_t::<U64<LE>>()?.get();
+
+        let expected_size = first_header.length_of_header();
+        let (mut decoder, is_solid) = if size == u64::from(expected_size) {
+            (Decoder::None(reader), false)
+        } else if size & IS_COMPRESSED_MASK != 0 {
+            (Decoder::NsisBi(nsisbi::Decoder::new(reader)), false)
+        } else {
+            // Solid installers have no size prefix before the compressed stream
+            reader.seek_relative(-(size_of::<u64>() as i64))?;
+            let mut decoder = nsisbi::Decoder::new(reader);
+            let decompressed_header_size = decoder.read_t::<U64<LE>>()?.get();
+            if decompressed_header_size != u64::from(expected_size) {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Decompressed header size ({decompressed_header_size}) did not equal size defined in first header ({expected_size})",
+                    ),
+                ));
+            }
+            (Decoder::NsisBi(decoder), true)
+        };
+
+        let mut decompressed_data = vec![0; expected_size as usize];
+        decoder.read_exact(&mut decompressed_data)?;
+
+        let compression = match &decoder {
+            Decoder::NsisBi(decoder) => decoder.compression().unwrap_or(Compression::Zlib),
+            _ => Compression::None,
+        };
+
+        debug!(?compression, is_solid);
+
+        Ok(Decompressed {
+            data: decompressed_data,
+            is_solid,
+            non_solid_start_offset: u32::try_from(size & !IS_COMPRESSED_MASK).unwrap_or(u32::MAX),
             compression,
             decoder,
         })

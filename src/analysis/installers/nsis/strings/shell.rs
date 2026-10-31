@@ -89,7 +89,8 @@ impl Shell {
 
         if index1 & (1 << 7) != 0 {
             let offset = index1 & 0x3F;
-            let is_64_bit = index1 & (1 << 6) != 0;
+            // A 64-bit process reads the 64-bit registry view even without the 64-bit flag
+            let is_64_bit = index1 & (1 << 6) != 0 || state.is_64_bit;
             let shell_string = state.get_string(i32::from(offset));
             if shell_string == PROGRAM_FILES_DIR {
                 buf.push_str(if is_64_bit {

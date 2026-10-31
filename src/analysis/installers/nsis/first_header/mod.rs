@@ -94,6 +94,25 @@ impl FirstHeader {
         self.flags
     }
 
+    /// Returns `true` if the installer was built with the nsisbi fork of NSIS.
+    #[inline]
+    pub const fn is_nsisbi(&self) -> bool {
+        self.flags().contains(HeaderFlags::NSISBI)
+    }
+
+    /// Returns the size of the first header in the installer.
+    ///
+    /// nsisbi appends the 64-bit length of the data block to the first header.
+    #[inline]
+    pub const fn size(&self) -> u64 {
+        size_of::<Self>() as u64
+            + if self.is_nsisbi() {
+                size_of::<u64>() as u64
+            } else {
+                0
+            }
+    }
+
     #[inline]
     pub const fn signature(&self) -> NsisSignature {
         self.signature

@@ -3,11 +3,12 @@ use std::io::{Read, Result, Seek};
 use flate2::read::ZlibDecoder;
 use lzma_rust2::LzmaReader;
 
-use super::{LzmaStreamHeader, nsis_bzip2};
+use super::{LzmaStreamHeader, nsis_bzip2, nsisbi};
 
 pub enum Decoder<R: Read + Seek> {
     Lzma(Box<LzmaReader<R>>),
     NsisBZip2(nsis_bzip2::Decoder<R>),
+    NsisBi(nsisbi::Decoder<R>),
     Zlib(ZlibDecoder<R>),
     None(R),
 }
@@ -31,6 +32,7 @@ impl<R: Read + Seek> Decoder<R> {
         match self {
             Self::Lzma(reader) => reader.into_inner(),
             Self::NsisBZip2(reader) => reader.into_inner(),
+            Self::NsisBi(reader) => reader.into_inner(),
             Self::Zlib(reader) => reader.into_inner(),
             Self::None(reader) => reader,
         }
@@ -42,6 +44,7 @@ impl<R: Read + Seek> Read for Decoder<R> {
         match self {
             Self::Lzma(reader) => reader.read(buf),
             Self::NsisBZip2(reader) => reader.read(buf),
+            Self::NsisBi(reader) => reader.read(buf),
             Self::Zlib(reader) => reader.read(buf),
             Self::None(reader) => reader.read(buf),
         }
