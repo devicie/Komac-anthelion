@@ -8,6 +8,7 @@ use zerocopy::{FromBytes, I32, LE, U16};
 use super::{
     Variables,
     entry::{Entry, EntryError, ExecFlags, system::MockCaller},
+    nsisbi,
     park::{self, ParkLayout},
 };
 use crate::analysis::installers::nsis::{
@@ -33,6 +34,9 @@ pub struct NsisState<'data> {
     pub last_used_exec_flags: ExecFlags,
     pub status_up_hack: I32<LE>,
     pub mock_caller: MockCaller,
+    /// Whether the installer runs as a 64-bit process, in which case registry and shell folder
+    /// lookups aren't redirected to their 32-bit views.
+    pub is_64_bit: bool,
     version: NsisVersion,
 }
 
@@ -41,6 +45,8 @@ impl<'data> NsisState<'data> {
         data: &'data [u8],
         header: &Header,
         manifest: Option<&str>,
+        is_64_bit: bool,
+        is_nsisbi: bool,
     ) -> Result<Self, NsisError> {
         let mut state = Self {
             str_block: header.blocks().strings_block(data),
@@ -54,6 +60,7 @@ impl<'data> NsisState<'data> {
             last_used_exec_flags: ExecFlags::new(),
             status_up_hack: I32::ZERO,
             mock_caller: MockCaller::new(),
+            is_64_bit,
             version: NsisVersion::default(),
         };
 
@@ -64,8 +71,11 @@ impl<'data> NsisState<'data> {
 
         debug!(version = %state.version);
 
-        // Park inserts opcodes into the NSIS 2 opcode table, so its entries must be translated
-        state.entries = if state.is_park() {
+        // Park and nsisbi insert opcodes into the NSIS opcode table, so their entries must be
+        // translated
+        state.entries = if is_nsisbi {
+            Cow::Owned(nsisbi::read_entries(header.blocks().entries_block(data))?)
+        } else if state.is_park() {
             let raw_entries = park::raw_entries(header.blocks().entries_block(data))?;
             let layout = ParkLayout::detect(raw_entries, state.str_block, state.is_unicode());
             debug!(?layout);
