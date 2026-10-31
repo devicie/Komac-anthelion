@@ -31,6 +31,11 @@ use window_message::WindowMessage;
 use zerocopy::{I32, Immutable, KnownLayout, LE, TryFromBytes, U64};
 
 use super::{
+    super::utils::{
+        RELATIVE_COMMON_FILES_32, RELATIVE_COMMON_FILES_64, RELATIVE_PROGRAM_DATA,
+        RELATIVE_PROGRAM_FILES_32, RELATIVE_PROGRAM_FILES_64, RELATIVE_SYSTEM_DRIVE,
+        RELATIVE_SYSTEM_ROOT, RELATIVE_WINDOWS_DIR,
+    },
     file_system::RelativeLocation,
     registry::{RegRoot, RegType},
     state::NsisState,
@@ -764,12 +769,18 @@ impl Entry {
 
                         let range = start_byte..(start_byte + end_byte);
 
-                        result = match result {
-                            Cow::Borrowed(b) => Cow::Borrowed(&b[range]),
-                            Cow::Owned(mut o) => {
-                                o.truncate(range.end);
-                                o.drain(..range.start);
-                                Cow::Owned(o)
+                        result = if let Some(drive) =
+                            system_drive_prefix(&source, start_char, new_length)
+                        {
+                            Cow::Borrowed(drive)
+                        } else {
+                            match result {
+                                Cow::Borrowed(b) => Cow::Borrowed(&b[range]),
+                                Cow::Owned(mut o) => {
+                                    o.truncate(range.end);
+                                    o.drain(..range.start);
+                                    Cow::Owned(o)
+                                }
                             }
                         };
                     }
@@ -1558,9 +1569,47 @@ impl Entry {
     }
 }
 
+/// Relative folders that are always on the system drive.
+const SYSTEM_DRIVE_FOLDERS: [&str; 8] = [
+    RELATIVE_WINDOWS_DIR,
+    RELATIVE_SYSTEM_ROOT,
+    RELATIVE_PROGRAM_FILES_64,
+    RELATIVE_PROGRAM_FILES_32,
+    RELATIVE_COMMON_FILES_64,
+    RELATIVE_COMMON_FILES_32,
+    RELATIVE_PROGRAM_DATA,
+    RELATIVE_SYSTEM_DRIVE,
+];
+
+/// Handles the common idiom of copying the first 2 or 3 characters of a system folder to get the
+/// system drive, such as `StrCpy $INSTDIR $WINDIR 2` (`C:`) or `StrCpy $0 $PROGRAMFILES 3`
+/// (`C:\`).
+///
+/// Without this, the relative folder would be truncated to something like `%W`.
+fn system_drive_prefix(source: &str, start_char: usize, length: usize) -> Option<&'static str> {
+    const SYSTEM_DRIVE_WITH_SEPARATOR: &str = "%SystemDrive%\\";
+
+    if start_char != 0 {
+        return None;
+    }
+
+    let drive = match length {
+        2 => RELATIVE_SYSTEM_DRIVE,
+        3 => SYSTEM_DRIVE_WITH_SEPARATOR,
+        _ => return None,
+    };
+
+    SYSTEM_DRIVE_FOLDERS
+        .iter()
+        .any(|folder| source.starts_with(folder))
+        .then_some(drive)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Entry;
+    use rstest::rstest;
+
+    use super::{Entry, system_drive_prefix};
 
     #[test]
     fn entry_size() {
@@ -1570,5 +1619,21 @@ mod tests {
     #[test]
     fn entry_alignment() {
         assert_eq!(align_of::<Entry>(), align_of::<u32>())
+    }
+
+    #[rstest]
+    #[case("%WinDir%", 0, 2, Some("%SystemDrive%"))]
+    #[case("%ProgramFiles%\\App", 0, 3, Some("%SystemDrive%\\"))]
+    #[case("%WinDir%", 0, 4, None)]
+    #[case("%WinDir%", 1, 2, None)]
+    #[case("%LocalAppData%", 0, 2, None)]
+    #[case("C:\\Windows", 0, 2, None)]
+    fn system_drive(
+        #[case] source: &str,
+        #[case] start_char: usize,
+        #[case] length: usize,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(system_drive_prefix(source, start_char, length), expected);
     }
 }
