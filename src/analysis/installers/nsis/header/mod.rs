@@ -135,6 +135,33 @@ fn is_lzma(data: &[u8]) -> Option<Compression> {
     }
 }
 
+/// Returns `true` if the data is a raw LZMA2 stream prefixed with its dictionary size, as written
+/// by some custom NSIS builds.
+///
+/// ```text
+/// dd                dictionary size (0..=40)
+/// Cu UU UU PP PP    LZMA chunk that resets the dictionary and sets new properties (C >= 0xE)
+/// pp                LZMA properties
+/// 00                first byte of the range coder
+/// ```
+fn is_lzma2(data: &[u8]) -> bool {
+    const MAX_DICTIONARY_SIZE: u8 = 40;
+    const DICTIONARY_RESET_CHUNK: u8 = 0xE0;
+
+    let &[dictionary_size, control, _, _, _, _, props, range_coder, ..] = data else {
+        return false;
+    };
+
+    let (literal_context_bits, rest) = (props % 9, props / 9);
+    let (literal_position_bits, position_bits) = (rest % 5, rest / 5);
+
+    dictionary_size <= MAX_DICTIONARY_SIZE
+        && control & DICTIONARY_RESET_CHUNK == DICTIONARY_RESET_CHUNK
+        && position_bits <= 4
+        && literal_context_bits + literal_position_bits <= 4
+        && range_coder == 0
+}
+
 fn is_bzip2(data: &[u8]) -> bool {
     const BZIP2_MAGIC: u8 = 0x31;
 
@@ -210,6 +237,10 @@ impl Header {
 
           01 tt         solid BZip (tt < 14)
           other         solid Deflate
+
+          Some custom builds use raw LZMA2, prefixed with its dictionary size (dd <= 40):
+          dd Ex UU UU PP PP pp 00                 solid LZMA2
+          SS SS SS 80 dd Ex UU UU PP PP pp 00     non-solid LZMA2
         */
 
         // Read the signature
@@ -227,15 +258,20 @@ impl Header {
             Compression::None
         } else if let Some(lzma_compression) = is_lzma(&signature) {
             lzma_compression
-        } else if signature.get(3) == Some(&0x80) {
+        } else if signature.get(3) == Some(&0x80) && !is_lzma2(&signature) {
             is_solid = false;
-            is_lzma(&signature[NON_SOLID_EXTRA_BYTES..]).unwrap_or_else(|| {
-                if is_bzip2(&signature[NON_SOLID_EXTRA_BYTES..]) {
+            let data = &signature[NON_SOLID_EXTRA_BYTES..];
+            is_lzma(data).unwrap_or_else(|| {
+                if is_lzma2(data) {
+                    Compression::Lzma2
+                } else if is_bzip2(data) {
                     Compression::BZip2
                 } else {
                     Compression::Zlib
                 }
             })
+        } else if is_lzma2(&signature) {
+            Compression::Lzma2
         } else if is_bzip2(&signature) {
             Compression::BZip2
         } else {
@@ -256,6 +292,10 @@ impl Header {
             Compression::Lzma(_) => {
                 let header = reader.read_t::<LzmaStreamHeader>()?;
                 Decoder::new_lzma1(reader, header)?
+            }
+            Compression::Lzma2 => {
+                let dictionary_size = reader.read_t::<u8>()?;
+                Decoder::new_lzma2(reader, dictionary_size)
             }
             Compression::BZip2 => Decoder::NsisBZip2(nsis_bzip2::Decoder::new(
                 reader,
@@ -451,5 +491,25 @@ impl fmt::Debug for Header {
             .field("str_uninstcmd", &self.str_uninstall_command.get())
             .field("str_wininit", &self.str_win_init.get())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::is_lzma2;
+
+    #[rstest]
+    #[case::header_chunk(&[0x18, 0xF1, 0x0A, 0x12, 0xC0, 0x04, 0x5D, 0x00], true)]
+    #[case::file_chunk(&[0x18, 0xE0, 0x2F, 0xFF, 0x1A, 0xF3, 0x5D, 0x00], true)]
+    #[case::lzma(&[0x5D, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00], false)]
+    #[case::invalid_dictionary_size(&[0x29, 0xE0, 0x2F, 0xFF, 0x1A, 0xF3, 0x5D, 0x00], false)]
+    #[case::no_dictionary_reset(&[0x18, 0xC0, 0x2F, 0xFF, 0x1A, 0xF3, 0x5D, 0x00], false)]
+    #[case::invalid_props(&[0x18, 0xE0, 0x2F, 0xFF, 0x1A, 0xF3, 0xE1, 0x00], false)]
+    #[case::non_zero_range_coder(&[0x18, 0xE0, 0x2F, 0xFF, 0x1A, 0xF3, 0x5D, 0x01], false)]
+    #[case::too_short(&[0x18, 0xE0, 0x2F], false)]
+    fn lzma2(#[case] data: &[u8], #[case] expected: bool) {
+        assert_eq!(is_lzma2(data), expected);
     }
 }
