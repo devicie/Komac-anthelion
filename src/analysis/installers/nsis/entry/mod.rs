@@ -37,6 +37,11 @@ use window_message::WindowMessage;
 use zerocopy::{I32, Immutable, KnownLayout, LE, TryFromBytes, U64};
 
 use super::{
+    super::utils::{
+        RELATIVE_COMMON_FILES_32, RELATIVE_COMMON_FILES_64, RELATIVE_PROGRAM_DATA,
+        RELATIVE_PROGRAM_FILES_32, RELATIVE_PROGRAM_FILES_64, RELATIVE_SYSTEM_DRIVE,
+        RELATIVE_SYSTEM_ROOT, RELATIVE_WINDOWS_DIR,
+    },
     Variables,
     file_system::RelativeLocation,
     registry::{RegRoot, RegType},
@@ -823,7 +828,10 @@ impl Entry {
                 let max_length = state.get_int(max_length.get());
                 let start_position = state.get_int(start_position.get());
                 let result = state.with_string(string_offset.get(), |source| {
-                    super::variables::copy_string(source, max_length, start_position)
+                    system_drive_prefix(source, max_length, start_position).map_or_else(
+                        || super::variables::copy_string(source, max_length, start_position),
+                        str::to_owned,
+                    )
                 });
                 debug!(
                     r#"StrCpy ${index} "{}" {max_length} {start_position} # = "{result}""#,
@@ -1944,11 +1952,48 @@ impl Entry {
     }
 }
 
+/// Relative folders that are always on the system drive.
+const SYSTEM_DRIVE_FOLDERS: [&str; 8] = [
+    RELATIVE_WINDOWS_DIR,
+    RELATIVE_SYSTEM_ROOT,
+    RELATIVE_PROGRAM_FILES_64,
+    RELATIVE_PROGRAM_FILES_32,
+    RELATIVE_COMMON_FILES_64,
+    RELATIVE_COMMON_FILES_32,
+    RELATIVE_PROGRAM_DATA,
+    RELATIVE_SYSTEM_DRIVE,
+];
+
+/// Handles the common idiom of copying the first 2 or 3 characters of a system folder to get the
+/// system drive, such as `StrCpy $INSTDIR $WINDIR 2` (`C:`) or `StrCpy $0 $PROGRAMFILES 3`
+/// (`C:\`).
+///
+/// Without this, the relative folder would be truncated to something like `%W`.
+fn system_drive_prefix(source: &str, max_length: i32, start_position: i32) -> Option<&'static str> {
+    const SYSTEM_DRIVE_WITH_SEPARATOR: &str = "%SystemDrive%\\";
+
+    if start_position != 0 {
+        return None;
+    }
+
+    let drive = match max_length {
+        2 => RELATIVE_SYSTEM_DRIVE,
+        3 => SYSTEM_DRIVE_WITH_SEPARATOR,
+        _ => return None,
+    };
+
+    SYSTEM_DRIVE_FOLDERS
+        .iter()
+        .any(|folder| source.starts_with(folder))
+        .then_some(drive)
+}
+
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use zerocopy::TryFromBytes;
 
-    use super::Entry;
+    use super::{Entry, system_drive_prefix};
 
     #[test]
     fn get_dll_version_operand_order() {
@@ -1979,5 +2024,24 @@ mod tests {
     #[test]
     fn entry_alignment() {
         assert_eq!(align_of::<Entry>(), align_of::<u32>())
+    }
+
+    #[rstest]
+    #[case("%WinDir%", 2, 0, Some("%SystemDrive%"))]
+    #[case("%ProgramFiles%\\App", 3, 0, Some("%SystemDrive%\\"))]
+    #[case("%WinDir%", 4, 0, None)]
+    #[case("%WinDir%", 2, 1, None)]
+    #[case("%LocalAppData%", 2, 0, None)]
+    #[case("C:\\Windows", 2, 0, None)]
+    fn system_drive(
+        #[case] source: &str,
+        #[case] max_length: i32,
+        #[case] start_position: i32,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(
+            system_drive_prefix(source, max_length, start_position),
+            expected
+        );
     }
 }
