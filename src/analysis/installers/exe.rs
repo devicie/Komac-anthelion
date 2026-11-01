@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     analysis::{
-        PeInfo,
+        PeInfo, SiblingFiles,
         installers::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
@@ -64,11 +64,17 @@ pub enum ExeType {
 }
 
 impl Exe {
-    pub fn new<R: Read + Seek>(reader: R) -> Result<Self> {
-        Self::new_at_depth(reader, 0)
+    /// Analyses an exe, given the small files from beside it that some installers read their
+    /// settings from.
+    pub fn new<R: Read + Seek>(reader: R, siblings: &SiblingFiles) -> Result<Self> {
+        Self::new_at_depth(reader, siblings, 0)
     }
 
-    fn new_at_depth<R: Read + Seek>(mut reader: R, depth: usize) -> Result<Self> {
+    fn new_at_depth<R: Read + Seek>(
+        mut reader: R,
+        siblings: &SiblingFiles,
+        depth: usize,
+    ) -> Result<Self> {
         let pe = PE::read_from(&mut reader)?;
 
         let vs_version_info_bytes = pe.vs_version_info(&mut reader).ok();
@@ -162,7 +168,7 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
-        match InstallShield::new(&mut reader, &pe) {
+        match InstallShield::new(&mut reader, &pe, siblings) {
             Ok(installshield) => {
                 return Ok(Self {
                     r#type: ExeType::InstallShield(Box::new(installshield)),
@@ -263,7 +269,8 @@ impl Exe {
             && let Some(setup) = super::sfx::read_setup(&mut reader, &pe, product_name.as_deref())?
         {
             setup_archive = true;
-            let mut inner = Self::new_at_depth(Cursor::new(setup.data), depth + 1)?;
+            let mut inner =
+                Self::new_at_depth(Cursor::new(setup.data), &SiblingFiles::default(), depth + 1)?;
             if let ExeType::Nsis(nsis) = &mut inner.r#type {
                 if let Some(architecture) = setup.architecture {
                     nsis.architecture = architecture;

@@ -20,15 +20,7 @@ pub struct File {
 
 impl File {
     pub fn read_text<R: Read + Seek>(&self, reader: &mut R) -> Result<Option<String>, FileError> {
-        Ok(self.read(reader)?.map(|data| {
-            if let Some((encoding, bom_len)) = Encoding::for_bom(&data) {
-                encoding.decode(&data[bom_len..]).0.into_owned()
-            } else {
-                std::str::from_utf8(&data)
-                    .map(String::from)
-                    .unwrap_or_else(|_| UTF_16LE.decode(&data).0.into_owned())
-            }
-        }))
+        Ok(self.read(reader)?.map(|data| decode_text(&data)))
     }
 
     pub fn read<R: Read + Seek>(&self, reader: &mut R) -> Result<Option<Vec<u8>>, FileError> {
@@ -72,6 +64,17 @@ impl File {
         }
 
         Ok(Some(data))
+    }
+}
+
+/// Decodes a text file by its byte order mark, falling back to UTF-8 and then UTF-16LE.
+pub fn decode_text(data: &[u8]) -> String {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(data) {
+        encoding.decode(&data[bom_len..]).0.into_owned()
+    } else {
+        std::str::from_utf8(data)
+            .map(String::from)
+            .unwrap_or_else(|_| UTF_16LE.decode(data).0.into_owned())
     }
 }
 

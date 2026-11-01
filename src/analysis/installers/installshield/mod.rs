@@ -11,6 +11,7 @@ use std::{
 
 use encoding_rs::UTF_16LE;
 pub use file::FileError;
+use file::decode_text;
 use msi::LanguageId;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -25,7 +26,7 @@ use zerocopy::LittleEndian;
 
 use crate::{
     analysis::{
-        Installers,
+        Installers, SiblingFiles,
         installers::{
             installshield::{
                 file::File, setup_ini::SetupIni, setup_iss::SetupIss, setup_xml::SetupXml,
@@ -59,17 +60,24 @@ pub struct InstallShield {
 }
 
 impl InstallShield {
-    pub fn new<R: Read + Seek>(mut reader: R, pe: &PE) -> Result<Self, InstallShieldError> {
+    /// Analyses an InstallShield installer, falling back to the `setup.ini` and `setup.iss` from
+    /// beside it for those that aren't embedded, as a setup launcher reads them from its folder.
+    pub fn new<R: Read + Seek>(
+        mut reader: R,
+        pe: &PE,
+        siblings: &SiblingFiles,
+    ) -> Result<Self, InstallShieldError> {
         let Some(overlay_start) = pe.overlay_offset() else {
             return Err(InstallShieldError::NotInstallShieldFile);
         };
 
         let file_end = reader.seek(SeekFrom::End(0))?;
-        let overlay_data_end = pe
-            .certificate_table()
-            .map(|directory| u64::from(directory.virtual_address()))
-            .filter(|&offset| offset > overlay_start)
-            .unwrap_or(file_end);
+        let overlay_data_end = overlay_data_end(
+            overlay_start,
+            pe.certificate_table()
+                .map(|directory| u64::from(directory.virtual_address())),
+            file_end,
+        );
 
         enum InstallScriptEncoding {
             Unicode,
@@ -99,53 +107,74 @@ impl InstallShield {
                 })
                 .flatten();
 
+        // The version info alone identifies a setup launcher, which needn't embed any files: one
+        // whose overlay is empty or nothing but its Authenticode signature reads setup.ini and
+        // data1.cab from beside itself instead
+        let is_setup_launcher = encoding.is_some();
+        let has_overlay_data = overlay_data_end > overlay_start;
+        if !has_overlay_data && !is_setup_launcher {
+            return Err(InstallShieldError::NotInstallShieldFile);
+        }
+
         reader
             .seek(SeekFrom::Start(overlay_start))
             .map_err(|_| InstallShieldError::NotInstallShieldFile)?;
 
+        // Running out of bytes while reading the file table means the overlay isn't one, so treat
+        // it the same as a wrong magic rather than failing the whole exe's analysis
         let files = match encoding {
+            _ if !has_overlay_data => Ok(Vec::new()),
             Some(InstallScriptEncoding::Unicode) => {
-                let file_count = reader.read_u32::<LittleEndian>()?;
+                let file_count = reader.read_u32::<LittleEndian>().map_err(on_eof)?;
                 parse_installscript_entries(
                     &mut reader,
                     file_count,
                     read_utf16le_strz,
                     overlay_data_end,
-                )?
+                )
             }
             Some(InstallScriptEncoding::Ascii) => parse_installscript_entries(
                 &mut reader,
                 u32::MAX,
                 read_ascii_strz,
                 overlay_data_end,
-            )?,
+            ),
             None => {
                 let header = Header::read(&mut reader)?;
                 debug!(?header);
                 match header.kind {
-                    Kind::Plain => parse_plain_entries(&mut reader, header.num_files)?,
+                    Kind::Plain => parse_plain_entries(&mut reader, header.num_files),
                     Kind::SetupStream => {
-                        parse_stream_entries(&mut reader, header.num_files, header.header_type)?
+                        parse_stream_entries(&mut reader, header.num_files, header.header_type)
                     }
                 }
             }
+        }
+        .map_err(|error| match error {
+            InstallShieldError::Io(error) => on_eof(error),
+            error => error,
+        });
+        let files = match files {
+            Ok(files) => files,
+            Err(InstallShieldError::NotInstallShieldFile) if is_setup_launcher => Vec::new(),
+            Err(error) => return Err(error),
         };
 
         debug!(files = ?files.iter().map(|file| file.name.as_str()).collect::<Vec<_>>());
 
-        let setup_ini = find_and_parse(&files, &mut reader, "setup.ini", |content| {
-            SetupIni::from_str(content).ok()
-        });
+        let parse_setup_ini = |content: &str| SetupIni::from_str(content).ok();
+        let setup_ini = find_and_parse(&files, &mut reader, "setup.ini", parse_setup_ini)
+            .or_else(|| parse_sibling(siblings, "setup.ini", parse_setup_ini));
 
-        let setup_iss = find_and_parse(&files, &mut reader, "setup.iss", |content| {
-            serini::from_str::<SetupIss>(content).ok()
-        });
+        let parse_setup_iss = |content: &str| serini::from_str::<SetupIss>(content).ok();
+        let setup_iss = find_and_parse(&files, &mut reader, "setup.iss", parse_setup_iss)
+            .or_else(|| parse_sibling(siblings, "setup.iss", parse_setup_iss));
 
         let setup_xml = find_and_parse(&files, &mut reader, "Setup.xml", |content| {
             quick_xml::de::from_str::<SetupXml>(content).ok()
         });
 
-        if setup_ini.is_none() && setup_iss.is_none() && setup_xml.is_none() {
+        if setup_ini.is_none() && setup_iss.is_none() && setup_xml.is_none() && !is_setup_launcher {
             return Err(InstallShieldError::NotInstallShieldFile);
         }
 
@@ -185,6 +214,20 @@ fn find_and_parse<R: Read + Seek, T>(
         })
 }
 
+fn parse_sibling<T>(
+    siblings: &SiblingFiles,
+    name: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Option<T> {
+    let content = decode_text(siblings.get(name)?);
+    debug!("{name} from beside the setup launcher: {content}");
+    let result = parse(&content);
+    if result.is_none() {
+        debug!("Failed to parse {name} from beside the setup launcher");
+    }
+    result
+}
+
 impl Installers for InstallShield {
     fn installers(&self) -> Vec<Installer> {
         let startup = self.setup_ini.as_ref().map(|ini| &ini.startup);
@@ -192,6 +235,13 @@ impl Installers for InstallShield {
         let iss = self.setup_iss.as_ref();
         let script_driven = startup.and_then(|s| s.script_driven.as_deref());
         let msi_based = matches!(script_driven, Some("0" | "2"));
+
+        if self.setup_ini.is_none() && iss.is_none() && xml.is_none() {
+            warn!(
+                "InstallShield setup launcher without its setup.ini - its product code and \
+                 installer switches may need checking"
+            );
+        }
 
         if script_driven == Some("4") && iss.is_none() {
             warn!(
@@ -319,6 +369,24 @@ impl Installers for InstallShield {
     }
 }
 
+/// Returns where the overlay's data ends, which is where the Authenticode signature starts if
+/// it's in the overlay, including when the signature is the whole overlay.
+fn overlay_data_end(overlay_start: u64, certificate_offset: Option<u64>, file_end: u64) -> u64 {
+    certificate_offset
+        .filter(|&offset| offset >= overlay_start)
+        .unwrap_or(file_end)
+}
+
+/// Maps running out of bytes to [`InstallShieldError::NotInstallShieldFile`], as data that ends
+/// before its structure does can't be an InstallShield installer
+fn on_eof(error: io::Error) -> InstallShieldError {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        InstallShieldError::NotInstallShieldFile
+    } else {
+        InstallShieldError::Io(error)
+    }
+}
+
 fn read_u8<R: Read>(reader: &mut R) -> io::Result<u8> {
     let mut byte = [0u8; 1];
     reader.read_exact(&mut byte)?;
@@ -342,14 +410,6 @@ impl Header {
     fn read<R: Read + Seek>(reader: &mut R) -> Result<Self, InstallShieldError> {
         // An overlay too short to hold a header can't be an InstallShield installer, so run out of
         // bytes the same way a wrong magic does rather than failing the whole exe's analysis
-        fn on_eof(error: io::Error) -> InstallShieldError {
-            if error.kind() == io::ErrorKind::UnexpectedEof {
-                InstallShieldError::NotInstallShieldFile
-            } else {
-                InstallShieldError::Io(error)
-            }
-        }
-
         // Skip optional PDB 2.0 info (NB10 signature)
         let mut sig = [0u8; 4];
         reader.read_exact(&mut sig).map_err(on_eof)?;
@@ -507,7 +567,7 @@ mod tests {
     use winget_types::installer::Architecture;
 
     use super::{
-        InstallShield, setup_ini,
+        InstallShield, overlay_data_end, setup_ini,
         setup_ini::{SetupIni, Startup},
         setup_xml,
         setup_xml::{ArpInfo, LanguageSelection, SetupXml},
@@ -573,5 +633,42 @@ mod tests {
         let custom = installers[0].switches.custom().unwrap();
 
         assert_eq!(custom.to_string(), "/clone_wait");
+    }
+
+    #[rstest]
+    #[case::unsigned(0x400, None, 0x800, 0x800)]
+    #[case::signature_after_data(0x400, Some(0x600), 0x800, 0x600)]
+    #[case::signature_is_whole_overlay(0x400, Some(0x400), 0x800, 0x400)]
+    #[case::signature_before_overlay(0x400, Some(0x200), 0x800, 0x800)]
+    fn overlay_data_ends_at_signature(
+        #[case] overlay_start: u64,
+        #[case] certificate_offset: Option<u64>,
+        #[case] file_end: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(
+            overlay_data_end(overlay_start, certificate_offset, file_end),
+            expected
+        );
+    }
+
+    #[test]
+    fn setup_launcher_without_embedded_files() {
+        let installshield = InstallShield {
+            architecture: Architecture::X86,
+            setup_ini: None,
+            setup_iss: None,
+            setup_xml: None,
+        };
+
+        let installers = installshield.installers();
+        let installer = &installers[0];
+
+        assert_eq!(installer.switches.silent().unwrap().to_string(), "/s");
+        assert_eq!(
+            installer.switches.custom().unwrap().to_string(),
+            "/clone_wait"
+        );
+        assert!(installer.product_code.is_none());
     }
 }
