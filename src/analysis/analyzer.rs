@@ -12,7 +12,7 @@ use winget_types::{
     utils::ValidFileExtensions,
 };
 
-use super::{FontInfo, PeInfo};
+use super::{FontInfo, PeInfo, SiblingFiles};
 use crate::analysis::{
     Installers,
     installers::{
@@ -47,12 +47,41 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
         Self::with_installer_type(reader, file_name, font_analysis, None, &[])
     }
 
+    /// Analyses a file given the small files from beside it, such as from the same folder of a
+    /// ZIP, which some installers read their settings from.
+    pub(crate) fn with_sibling_files(
+        reader: &'reader mut R,
+        file_name: &str,
+        font_analysis: FontAnalysis,
+        siblings: &SiblingFiles,
+    ) -> Result<Self> {
+        Self::analyze(reader, file_name, font_analysis, None, &[], siblings)
+    }
+
     pub(crate) fn with_installer_type(
         reader: &'reader mut R,
         file_name: &str,
         font_analysis: FontAnalysis,
         installer_type: Option<InstallerType>,
         nested_installer_files: &[String],
+    ) -> Result<Self> {
+        Self::analyze(
+            reader,
+            file_name,
+            font_analysis,
+            installer_type,
+            nested_installer_files,
+            &SiblingFiles::default(),
+        )
+    }
+
+    fn analyze(
+        reader: &'reader mut R,
+        file_name: &str,
+        font_analysis: FontAnalysis,
+        installer_type: Option<InstallerType>,
+        nested_installer_files: &[String],
+        siblings: &SiblingFiles,
     ) -> Result<Self> {
         let path = Utf8Path::new(file_name);
         if installer_type != Some(InstallerType::Zip)
@@ -115,7 +144,7 @@ impl<'reader, R: Read + Seek> Analyzer<'reader, R> {
                 });
             }
             ValidFileExtensions::Exe => {
-                let mut exe = Exe::new(reader)?;
+                let mut exe = Exe::new(reader, siblings)?;
                 if exe.is_unrecognised() {
                     warn!(
                         "The installer framework of {file_name} wasn't recognised, so its installer type is a guess and its installer switches must be added manually"

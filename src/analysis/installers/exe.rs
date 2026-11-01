@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     analysis::{
-        PeInfo,
+        PeInfo, SiblingFiles,
         installers::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
@@ -63,7 +63,9 @@ pub enum ExeType {
 }
 
 impl Exe {
-    pub fn new<R: Read + Seek>(mut reader: R) -> Result<Self> {
+    /// Analyses an exe, given the small files from beside it that some installers read their
+    /// settings from.
+    pub fn new<R: Read + Seek>(mut reader: R, siblings: &SiblingFiles) -> Result<Self> {
         let pe = PE::read_from(&mut reader)?;
 
         let vs_version_info_bytes = pe.vs_version_info(&mut reader).ok();
@@ -173,7 +175,7 @@ impl Exe {
             Err(error) => return Err(error.into()),
         }
 
-        match InstallShield::new(&mut reader, &pe) {
+        match InstallShield::new(&mut reader, &pe, siblings) {
             Ok(installshield) => {
                 return Ok(Self {
                     r#type: ExeType::InstallShield(Box::new(installshield)),
