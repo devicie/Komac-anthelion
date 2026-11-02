@@ -19,7 +19,10 @@ use winget_types::{
 };
 
 use crate::{
-    analysis::{installers::msi::directory_table::DirectoryTable, r#trait::Installers},
+    analysis::{
+        installers::{msi::directory_table::DirectoryTable, utils::install_directory_scope},
+        r#trait::Installers,
+    },
     traits::{AsciiExt, path::NormalizePath},
 };
 
@@ -96,7 +99,7 @@ impl Msi {
                     // No value or control specifies per-user context
                     self.find_install_directory()
                         .as_deref()
-                        .and_then(Scope::from_install_directory)
+                        .and_then(install_directory_scope)
                         .or(Some(Scope::User))
                 }
             }
