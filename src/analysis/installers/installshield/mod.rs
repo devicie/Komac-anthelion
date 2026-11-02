@@ -32,7 +32,7 @@ use crate::{
                 file::File, setup_ini::SetupIni, setup_iss::SetupIss, setup_xml::SetupXml,
             },
             pe::{PE, VSVersionInfo},
-            utils::RELATIVE_PROGRAM_FILES_64,
+            utils::{RELATIVE_PROGRAM_FILES_64, install_directory_scope},
         },
     },
     read::ReadBytesExt,
@@ -319,7 +319,7 @@ impl Installers for InstallShield {
 
         let scope = install_dir
             .as_deref()
-            .and_then(Scope::from_install_directory)
+            .and_then(install_directory_scope)
             .or(Some(Scope::Machine));
 
         vec![Installer {

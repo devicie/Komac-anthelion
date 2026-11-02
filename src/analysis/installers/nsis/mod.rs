@@ -33,7 +33,7 @@ use winget_types::{
     LanguageTag,
     installer::{
         AppsAndFeaturesEntries, AppsAndFeaturesEntry, Architecture, InstallationMetadata,
-        Installer, InstallerType, Scope,
+        Installer, InstallerType,
     },
     utils::ValidFileExtensions,
 };
@@ -47,7 +47,9 @@ use super::{
         header::{Compression, Decoder, Decompressed, Header, nsis_bzip2},
     },
     pe::{PE, utils::machine_from_exe_reader},
-    utils::{LzmaStreamHeader, RELATIVE_PROGRAM_FILES_64, RELATIVE_TEMP_FOLDER},
+    utils::{
+        LzmaStreamHeader, RELATIVE_PROGRAM_FILES_64, RELATIVE_TEMP_FOLDER, install_directory_scope,
+    },
 };
 use crate::{
     analysis::Installers,
@@ -311,7 +313,7 @@ impl Installers for Nsis {
         let install_directory_scope = self
             .install_directory
             .as_deref()
-            .and_then(Scope::from_install_directory);
+            .and_then(install_directory_scope);
         let scope = match (detected_scope, install_directory_scope) {
             (Some(detected_scope), Some(install_directory_scope))
                 if detected_scope != install_directory_scope =>
@@ -373,6 +375,7 @@ impl Installers for Nsis {
 #[cfg(test)]
 mod tests {
     use registry::RegRoot;
+    use winget_types::installer::Scope;
 
     use super::*;
 
