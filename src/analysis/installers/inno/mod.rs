@@ -21,62 +21,37 @@ use super::utils::{
 };
 use crate::analysis::Installers;
 
-const CODE: &str = "{code:";
+pub mod constants;
+
+/// The suffix Inno appends to the App ID to create the uninstall registry key.
+const IS1_SUFFIX: &str = "_is1";
 
 impl Installers for InnoInner {
     fn installers(&self) -> Vec<Installer> {
-        let scope = self.header().privileges_required().to_scope();
+        let header = self.header();
+        let expand = |value: Option<&str>| value.and_then(|value| constants::expand(self, value));
 
-        let install_dir = scope.and_then(|scope| {
-            self.header
-                .default_dir_name()
-                .map(str::to_owned)
-                .map(|install_dir| to_relative_install_dir(install_dir, scope))
-                .filter(|dir| !dir.contains(['{', '}']))
+        let scope = header.privileges_required().to_scope();
+
+        let install_dir = scope.and_then(|scope| self.install_dir(scope));
+
+        let product_code = expand(header.app_id()).map(|app_id| format!("{app_id}{IS1_SUFFIX}"));
+
+        let app_name = expand(header.app_name());
+        let app_version = expand(header.app_version());
+
+        let app_versioned_name = expand(header.app_versioned_name()).or_else(|| {
+            let (app_name, app_version) = (app_name.as_deref()?, app_version.as_deref()?);
+            if self.version().major() >= 7 {
+                Some(format!("{app_name} {app_version}"))
+            } else {
+                Some(format!("{app_name} version {app_version}"))
+            }
         });
 
-        let product_code = self
-            .header()
-            .product_code()
-            .filter(|code| !code.starts_with(CODE));
+        let display_name = expand(header.uninstall_name()).or(app_versioned_name);
 
-        let app_versioned_name = self
-            .header
-            .app_versioned_name()
-            .filter(|code| !code.starts_with(CODE))
-            .map(str::to_owned)
-            .or_else(|| {
-                if self.version().major() >= 7 {
-                    Some(format!(
-                        "{} {}",
-                        self.header.app_name()?,
-                        self.header.app_version()?
-                    ))
-                } else {
-                    Some(format!(
-                        "{} version {}",
-                        self.header.app_name()?,
-                        self.header.app_version()?
-                    ))
-                }
-            });
-
-        let display_name = self
-            .header()
-            .uninstall_name()
-            .or_else(|| self.header().app_versioned_name())
-            .or(app_versioned_name.as_deref())
-            .filter(|name| !name.starts_with(CODE));
-
-        let publisher = self
-            .header()
-            .app_publisher()
-            .filter(|publisher| !publisher.starts_with(CODE));
-
-        let display_version = self
-            .header()
-            .app_version()
-            .filter(|version| !version.starts_with(CODE));
+        let publisher = expand(header.app_publisher());
 
         let mut installer = Installer {
             locale: self.primary_language().and_then(|language_entry| {
@@ -85,22 +60,22 @@ impl Installers for InnoInner {
                     .parse::<LanguageTag>()
                     .ok()
             }),
-            architecture: WingetArchitecture::from_inno(self.header().architectures_allowed()),
+            architecture: WingetArchitecture::from_inno(header.architectures_allowed()),
             r#type: Some(InstallerType::Inno),
             scope,
             url: DecodedUrl::default(),
             sha_256: Sha256String::default(),
             unsupported_os_architectures: UnsupportedOSArchitecture::from_inno(
-                self.header().architectures_disallowed(),
+                header.architectures_disallowed(),
             ),
-            apps_and_features_entries: if [display_name, publisher, display_version]
-                .iter()
-                .any(Option::is_some)
+            apps_and_features_entries: if display_name.is_some()
+                || publisher.is_some()
+                || app_version.is_some()
             {
                 AppsAndFeaturesEntry::builder()
                     .maybe_display_name(display_name)
                     .maybe_publisher(publisher)
-                    .maybe_display_version(display_version)
+                    .maybe_display_version(app_version)
                     .maybe_product_code(product_code.clone())
                     .build()
                     .into()
@@ -108,10 +83,9 @@ impl Installers for InnoInner {
                 AppsAndFeaturesEntries::new()
             },
             product_code,
-            elevation_requirement: self
-                .header()
+            elevation_requirement: header
                 .privileges_required()
-                .to_elevation_requirement(self.header().privileges_required_overrides_allowed()),
+                .to_elevation_requirement(header.privileges_required_overrides_allowed()),
             installation_metadata: InstallationMetadata::new_install_location(
                 install_dir.map(winget_types::PathBuf::from),
             ),
@@ -154,12 +128,7 @@ impl Installers for InnoInner {
                     .maybe_custom(has_scope_switch.then_some(override_switch))
                     .build(),
                 installation_metadata: InstallationMetadata::new_install_location(
-                    self.header()
-                        .default_dir_name()
-                        .map(|install_dir| {
-                            to_relative_install_dir(install_dir.to_owned(), override_scope)
-                        })
-                        .filter(|dir| !dir.contains(['{', '}']))
+                    self.install_dir(override_scope)
                         .map(winget_types::PathBuf::from),
                 ),
                 ..installer.clone()
@@ -167,6 +136,19 @@ impl Installers for InnoInner {
 
             vec![installer, override_installer]
         }
+    }
+}
+
+trait InnoExt {
+    /// Returns the default install directory for the given scope, relative to a known folder.
+    fn install_dir(&self, scope: Scope) -> Option<String>;
+}
+
+impl InnoExt for InnoInner {
+    fn install_dir(&self, scope: Scope) -> Option<String> {
+        let install_dir =
+            to_relative_install_dir(self.header().default_dir_name()?.to_owned(), scope);
+        constants::expand(self, &install_dir)
     }
 }
 
