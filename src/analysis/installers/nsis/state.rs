@@ -7,7 +7,7 @@ use zerocopy::{FromBytes, I32, LE, U16};
 
 use super::{
     Variables,
-    entry::{Entry, EntryError, ExecFlags, system::MockCaller},
+    entry::{Entry, EntryError, ExecFlags, system::MockCaller, user_info::AccountType},
     nsisbi,
     park::{self, ParkLayout},
 };
@@ -34,6 +34,8 @@ pub struct NsisState<'data> {
     pub last_used_exec_flags: ExecFlags,
     pub status_up_hack: I32<LE>,
     pub mock_caller: MockCaller,
+    /// The account type of the user running the installer, as reported by the UserInfo plugin.
+    pub account_type: AccountType,
     /// Whether the installer runs as a 64-bit process, in which case registry and shell folder
     /// lookups aren't redirected to their 32-bit views.
     pub is_64_bit: bool,
@@ -60,6 +62,7 @@ impl<'data> NsisState<'data> {
             last_used_exec_flags: ExecFlags::new(),
             status_up_hack: I32::ZERO,
             mock_caller: MockCaller::new(),
+            account_type: AccountType::from_manifest(manifest),
             is_64_bit,
             version: NsisVersion::default(),
         };

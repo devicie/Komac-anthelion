@@ -7,6 +7,7 @@ mod push_pop;
 mod seek_from;
 mod show_window;
 pub mod system;
+pub mod user_info;
 mod window_message;
 
 use std::{
@@ -1152,6 +1153,8 @@ impl Entry {
                             state.stack.pop();
                         }
                         state.stack.push(Cow::Borrowed("success"));
+                    } else if dll_file_name.ends_with(user_info::USER_INFO_DLL) {
+                        user_info::call(&function, state.account_type, &mut state.stack);
                     }
                     debug!(
                         "CallInstDLL: {dll_file_name} {function}{}",
