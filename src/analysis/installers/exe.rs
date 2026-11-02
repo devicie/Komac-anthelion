@@ -16,6 +16,7 @@ use crate::{
             advanced::AdvancedInstallerError,
             burn::BurnError,
             iexpress::IExpressError,
+            inno::constants as inno_constants,
             installaware::InstallAwareError,
             installshield::InstallShieldError,
             nsis::NsisError,
@@ -143,11 +144,16 @@ impl Exe {
 
         match Inno::new(&mut reader) {
             Ok(inno) => {
+                // The version info of an Inno installer defaults to its AppCopyright, AppName and
+                // AppPublisher directives, which can contain unexpanded Inno constants
+                let expand = |value: Option<String>| {
+                    value.and_then(|value| inno_constants::expand(&inno.inner, &value))
+                };
                 return Ok(Self {
+                    legal_copyright: expand(legal_copyright),
+                    product_name: expand(product_name),
+                    company_name: expand(company_name),
                     r#type: ExeType::Inno(Box::new(inno.inner)),
-                    legal_copyright,
-                    product_name,
-                    company_name,
                     file_version,
                     product_version,
                     pe_info,
