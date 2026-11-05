@@ -58,8 +58,12 @@ pub fn is_manifest_file<M: Manifest>(
 
             locale.is_some_and(|locale| {
                 default_locale.is_some_and(|default_locale| match M::TYPE {
-                    ManifestType::DefaultLocale => default_locale.to_string() == locale,
-                    ManifestType::Locale => default_locale.to_string() != locale,
+                    ManifestType::DefaultLocale => {
+                        default_locale.to_string().eq_ignore_ascii_case(locale)
+                    }
+                    ManifestType::Locale => {
+                        !default_locale.to_string().eq_ignore_ascii_case(locale)
+                    }
                     _ => false,
                 })
             })
@@ -197,6 +201,24 @@ mod tests {
     fn valid_default_locale_manifest_file() {
         assert!(is_manifest_file::<DefaultLocaleManifest>(
             "Package.Identifier.locale.en-US.yaml",
+            &"Package.Identifier".parse::<PackageIdentifier>().unwrap(),
+            Some(&LanguageTag::new(langid!("en-US"))),
+        ))
+    }
+
+    #[test]
+    fn lowercase_default_locale_manifest_file() {
+        assert!(is_manifest_file::<DefaultLocaleManifest>(
+            "Package.Identifier.locale.en-us.yaml",
+            &"Package.Identifier".parse::<PackageIdentifier>().unwrap(),
+            Some(&LanguageTag::new(langid!("en-US"))),
+        ))
+    }
+
+    #[test]
+    fn lowercase_default_locale_is_not_locale_manifest_file() {
+        assert!(!is_manifest_file::<LocaleManifest>(
+            "Package.Identifier.locale.en-us.yaml",
             &"Package.Identifier".parse::<PackageIdentifier>().unwrap(),
             Some(&LanguageTag::new(langid!("en-US"))),
         ))
