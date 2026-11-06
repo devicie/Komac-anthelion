@@ -76,8 +76,8 @@ pub fn pull_request_body(
     #[builder(default)] issue_resolves: &[NonZeroU32],
     alternative_text: Option<&str>,
     #[builder(default)] automated: bool,
-    _created_with: Option<&str>,
-    _created_with_url: Option<&DecodedUrl>,
+    created_with: Option<&str>,
+    created_with_url: Option<&DecodedUrl>,
 ) -> String {
     const EMOJIS: [&str; 10] = ["🌌", "🌠", "⭐", "✨", "🌟", "☄️", "🚀", "🛰️", "🌠", "🔭"];
 
@@ -89,10 +89,20 @@ pub fn pull_request_body(
         let emoji = EMOJIS[rng.random_range(0..EMOJIS.len())];
 
         if automated {
-            let _ = write!(body, "Automatically updated by {emoji} Anthelion.");
+            let _ = write!(body, "Automatically updated by {emoji} Anthelion");
         } else {
-            let _ = write!(body, "Created by {emoji} Anthelion.");
+            let _ = write!(body, "Created by {emoji} Anthelion");
         }
+        match (created_with, created_with_url) {
+            (Some(created_with), Some(url)) => {
+                let _ = write!(body, " for [{created_with}]({url})");
+            }
+            (Some(created_with), None) => {
+                let _ = write!(body, " for {created_with}");
+            }
+            _ => {}
+        }
+        body.push('.');
     }
 
     if !issue_resolves.is_empty() {
@@ -177,6 +187,17 @@ mod tests {
                 .build()
                 .starts_with("Automatically updated by ")
         );
+    }
+
+    #[test]
+    fn pull_request_body_credits_created_with() {
+        let url = "https://devicie.com".parse().unwrap();
+        let body = pull_request_body()
+            .automated(true)
+            .created_with("Devicie")
+            .created_with_url(&url)
+            .build();
+        assert!(body.contains(" Anthelion for [Devicie](https://devicie.com/)."));
     }
 
     #[test]
