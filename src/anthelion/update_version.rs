@@ -8,7 +8,8 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use tokio::try_join;
 use winget_types::{
-    PackageIdentifier, PackageVersion,
+    PackageIdentifier, PackageVersion, Version,
+    installer::{AppsAndFeaturesEntry, InstallerManifest},
     locale::ReleaseNotes,
     url::{DecodedUrl, ReleaseNotesUrl},
 };
@@ -136,6 +137,7 @@ pub async fn update_package(
         .map_err(|e| InvalidArgument(format!("Invalid release notes: {e}")))?;
 
     let replace = parse_replacement(options.replace)?;
+    let display_version_override = parse_display_version(options.display_version)?;
 
     let package_kind = match options.package_kind.as_deref() {
         None | Some("auto") => None,
@@ -244,6 +246,10 @@ pub async fn update_package(
         .installer
         .update_installers(&installer_results, &possible_installer_files);
 
+    if let Some(display_version) = &display_version_override {
+        override_display_version(&mut manifests.installer, display_version);
+    }
+
     manifests.update(&package_version, &mut github_values, None);
 
     if let Some(release_notes_url) = release_notes_url {
@@ -327,6 +333,54 @@ fn parse_detected_version(
         .map_err(|error| InvalidArgument(format!("Invalid {field}: {error}")))?)
 }
 
+fn parse_display_version(display_version: Option<String>) -> Result<Option<Version>> {
+    display_version
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                Err(InvalidArgument("displayVersion must not be empty".into()).into())
+            } else {
+                Ok(Version::new(value))
+            }
+        })
+        .transpose()
+}
+
+/// Sets every Apps and Features entry's DisplayVersion, adding a root entry when there are none.
+fn override_display_version(installer: &mut InstallerManifest, display_version: &Version) {
+    let mut overridden = false;
+    for entry in installer.apps_and_features_entries.iter_mut().chain(
+        installer
+            .installers
+            .iter_mut()
+            .flat_map(|installer| installer.apps_and_features_entries.iter_mut()),
+    ) {
+        *entry = with_display_version(entry, display_version);
+        overridden = true;
+    }
+    if !overridden {
+        installer.apps_and_features_entries.push(
+            AppsAndFeaturesEntry::builder()
+                .display_version(display_version.clone())
+                .build(),
+        );
+    }
+}
+
+fn with_display_version(
+    entry: &AppsAndFeaturesEntry,
+    display_version: &Version,
+) -> AppsAndFeaturesEntry {
+    AppsAndFeaturesEntry::builder()
+        .maybe_display_name(entry.display_name())
+        .maybe_publisher(entry.publisher())
+        .display_version(display_version.clone())
+        .maybe_product_code(entry.product_code())
+        .maybe_upgrade_code(entry.upgrade_code())
+        .maybe_installer_type(entry.installer_type())
+        .build()
+}
+
 fn resolve_replace_version<'a>(
     replace: Option<&'a PackageVersion>,
     versions: &'a BTreeSet<PackageVersion>,
@@ -359,8 +413,61 @@ fn resolve_replace_version<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{VersionSelector, parse_replacement, parse_version_selector};
+    use winget_types::{
+        Version,
+        installer::{AppsAndFeaturesEntry, Installer, InstallerManifest},
+    };
+
+    use super::{
+        VersionSelector, override_display_version, parse_display_version, parse_replacement,
+        parse_version_selector,
+    };
     use crate::anthelion::types::ReplacementSelection;
+
+    #[test]
+    fn display_version_override_keeps_the_other_entry_fields() {
+        let mut manifest = InstallerManifest {
+            installers: vec![Installer {
+                apps_and_features_entries: AppsAndFeaturesEntry::builder()
+                    .publisher("Blackmagic Design")
+                    .display_version(Version::new("21.1.20010"))
+                    .product_code("{E7753090-1295-4993-987E-0914F6550153}")
+                    .build()
+                    .into(),
+                ..Installer::default()
+            }],
+            ..InstallerManifest::default()
+        };
+        override_display_version(&mut manifest, &Version::new("21.2.00005"));
+        let entry = manifest.installers[0]
+            .apps_and_features_entries
+            .iter()
+            .next()
+            .unwrap();
+        assert_eq!(entry.display_version().unwrap().as_str(), "21.2.00005");
+        assert_eq!(entry.publisher(), Some("Blackmagic Design"));
+        assert_eq!(
+            entry.product_code(),
+            Some("{E7753090-1295-4993-987E-0914F6550153}")
+        );
+    }
+
+    #[test]
+    fn display_version_override_adds_an_entry_when_there_are_none() {
+        let mut manifest = InstallerManifest {
+            installers: vec![Installer::default()],
+            ..InstallerManifest::default()
+        };
+        override_display_version(&mut manifest, &Version::new("2.0"));
+        let entry = manifest.apps_and_features_entries.iter().next().unwrap();
+        assert_eq!(entry.display_version().unwrap().as_str(), "2.0");
+    }
+
+    #[test]
+    fn empty_display_version_is_rejected() {
+        assert!(parse_display_version(Some("  ".into())).is_err());
+        assert!(parse_display_version(None).unwrap().is_none());
+    }
 
     #[test]
     fn version_selection_requires_only_the_relevant_value() {
