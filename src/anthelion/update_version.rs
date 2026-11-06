@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    mem,
+    env, mem,
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -8,7 +8,11 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use itertools::Itertools;
 use tokio::try_join;
-use winget_types::{PackageIdentifier, PackageVersion, locale::ReleaseNotes, url::ReleaseNotesUrl};
+use winget_types::{
+    PackageIdentifier, PackageVersion,
+    locale::ReleaseNotes,
+    url::{DecodedUrl, ReleaseNotesUrl},
+};
 
 use super::{
     analyze_installer::{analyze_sources, first_non_empty, parse_installer_inputs},
@@ -290,6 +294,12 @@ pub async fn update_package(
         })
         .collect();
     let pull_request = if submit {
+        let created_with = env::var("KOMAC_CREATED_WITH")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let created_with_url = env::var("KOMAC_CREATED_WITH_URL")
+            .ok()
+            .and_then(|url| url.parse::<DecodedUrl>().ok());
         let pull_request = github
             .add_version()
             .identifier(&package_identifier)
@@ -299,6 +309,8 @@ pub async fn update_package(
             .maybe_replace_version(replace_version)
             .issue_resolves(&[])
             .automated(true)
+            .maybe_created_with(created_with.as_deref())
+            .maybe_created_with_url(created_with_url.as_ref())
             .send()
             .await
             .wrap_err("Failed to create pull request")?;
