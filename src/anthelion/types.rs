@@ -128,6 +128,9 @@ pub struct UpdatePackageRequest {
     /// Existing version to remove in the same pull request.
     #[napi(ts_type = "{ target: 'latest' } | { target: 'version'; value: string }")]
     pub replace: Option<ReplacementSelection>,
+    /// DisplayVersion to write to every Apps and Features entry, for installers whose ARP version
+    /// komac can't read (it otherwise copies the previous version's entries unchanged).
+    pub display_version: Option<String>,
     /// Package layout. Defaults to `auto`, which probes standard manifests before fonts.
     #[napi(ts_type = "'auto' | 'standard' | 'font'")]
     pub package_kind: Option<String>,
