@@ -97,13 +97,22 @@ async fn run_graphql_request_with_retry(
         let request = request
             .try_clone()
             .expect("GraphQL requests always have a cloneable JSON body");
-        let (response, retryable) = deserialize(client.execute(request).await).await?;
-
-        if retry == MAX_GITHUB_REQUEST_RETRIES || !retryable {
-            return Ok(response);
-        }
-
-        let delay = graphql_retry_delay(retry);
+        let response = client.execute(request).await;
+        let rate_limit = response
+            .as_ref()
+            .ok()
+            .and_then(|response| rate_limit_delay(response.status(), response.headers()));
+        let delay = match deserialize(response).await {
+            Ok((response, retryable))
+                if retry == MAX_GITHUB_REQUEST_RETRIES || !(retryable || rate_limit.is_some()) =>
+            {
+                return Ok(response);
+            }
+            Err(error) if retry == MAX_GITHUB_REQUEST_RETRIES || rate_limit.is_none() => {
+                return Err(error);
+            }
+            _ => rate_limit.unwrap_or_else(|| graphql_retry_delay(retry)),
+        };
         tracing::info!(
             retry = retry + 1,
             max_retries = MAX_GITHUB_REQUEST_RETRIES,
@@ -167,7 +176,7 @@ where
 }
 
 fn is_retryable_response(response: &Response) -> bool {
-    is_retryable_status(response.status(), response.headers())
+    is_retryable_status(response.status())
 }
 
 fn is_retryable_graphql_response<ResponseData>(response: &GraphQlResponse<ResponseData>) -> bool {
@@ -183,11 +192,19 @@ fn is_retryable_graphql_error(error: &GraphQlError) -> bool {
         .starts_with("Something went wrong while executing your query")
 }
 
-fn is_retryable_status(status: StatusCode, headers: &HeaderMap) -> bool {
-    status == StatusCode::REQUEST_TIMEOUT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-        || (status == StatusCode::FORBIDDEN && headers.contains_key(RETRY_AFTER))
+/// Rate limits are retried by [`rate_limit_delay`] instead, as the backoff ignores `retry-after`
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT || status.is_server_error()
+}
+
+/// <https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#handle-rate-limit-errors-appropriately>
+fn rate_limit_delay(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
+    if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+
+    let seconds = headers.get(RETRY_AFTER)?.to_str().ok()?.parse().ok()?;
+    Some(Duration::from_secs(seconds))
 }
 
 fn graphql_retry_delay(retry: u32) -> Duration {
@@ -204,28 +221,32 @@ mod tests {
 
     #[test]
     fn retryable_status_codes() {
-        let headers = HeaderMap::new();
+        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
 
-        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT, &headers));
-        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS, &headers));
-        assert!(is_retryable_status(StatusCode::BAD_GATEWAY, &headers));
-        assert!(is_retryable_status(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &headers
-        ));
-        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT, &headers));
-
-        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED, &headers));
-        assert!(!is_retryable_status(StatusCode::FORBIDDEN, &headers));
-        assert!(!is_retryable_status(StatusCode::NOT_FOUND, &headers));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::FORBIDDEN));
+        assert!(!is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
     }
 
     #[test]
-    fn forbidden_with_retry_after_is_retryable() {
+    fn rate_limit_waits_for_retry_after() {
         let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("1"));
+        assert_eq!(rate_limit_delay(StatusCode::FORBIDDEN, &headers), None);
 
-        assert!(is_retryable_status(StatusCode::FORBIDDEN, &headers));
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        assert_eq!(
+            rate_limit_delay(StatusCode::FORBIDDEN, &headers),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            rate_limit_delay(StatusCode::TOO_MANY_REQUESTS, &headers),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(rate_limit_delay(StatusCode::BAD_GATEWAY, &headers), None);
     }
 
     #[test]
