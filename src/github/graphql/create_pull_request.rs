@@ -33,6 +33,7 @@ pub struct CreatePullRequestPayload {
 /// <https://docs.github.com/graphql/reference/objects#pullrequest>
 #[derive(Clone, cynic::QueryFragment)]
 pub struct PullRequest {
+    id: cynic::Id,
     number: i32,
     repository: Repository,
     url: Url,
@@ -44,6 +45,14 @@ impl PullRequest {
     #[inline]
     pub const fn name_with_owner(&self) -> &str {
         self.repository.name_with_owner.as_str()
+    }
+
+    /// Returns the Node ID of this pull request.
+    #[must_use]
+    #[inline]
+    #[allow(dead_code, reason = "used by the Anthelion library target")]
+    pub const fn id(&self) -> &cynic::Id {
+        &self.id
     }
 
     /// Returns the HTTP URL for this pull request.
@@ -152,6 +161,7 @@ mod tests {
             mutation CreatePullRequest($input: CreatePullRequestInput!) {
               createPullRequest(input: $input) {
                 pullRequest {
+                  id
                   number
                   repository {
                     nameWithOwner

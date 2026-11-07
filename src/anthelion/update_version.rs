@@ -295,6 +295,7 @@ pub async fn update_package(
             .send()
             .await
             .wrap_err("Failed to create pull request")?;
+        let _ = github.ignore_subscription(pull_request.id()).await;
         Some(CreatedPullRequest {
             url: pull_request.url().to_string(),
             diff_url: pull_request.diff_view_url().to_string(),

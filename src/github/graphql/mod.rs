@@ -12,6 +12,7 @@ pub mod get_repository_info;
 mod schema;
 pub mod types;
 pub mod update_refs;
+pub mod update_subscription;
 
 pub use get_file_content::GetFileContent;
 pub use schema::github_schema;
