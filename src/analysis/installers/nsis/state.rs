@@ -41,6 +41,9 @@ pub struct NsisState<'data> {
     pub last_used_exec_flags: ExecFlags,
     pub status_up_hack: I32<LE>,
     pub mock_caller: MockCaller,
+    /// Whether the installer runs as a 64-bit process, which reads shell folders from the 64-bit
+    /// registry view.
+    pub is_64_bit: bool,
     version: NsisVersion,
     string_version: NsisVersion,
     pub section_flags: Vec<i32>,
@@ -72,6 +75,7 @@ impl<'data> NsisState<'data> {
             last_used_exec_flags: ExecFlags::new(),
             status_up_hack: I32::ZERO,
             mock_caller: MockCaller::new(),
+            is_64_bit: false,
             version: NsisVersion::default(),
             string_version: NsisVersion::default(),
             file_positions: Vec::new(),
@@ -587,6 +591,7 @@ mod tests {
             last_used_exec_flags: ExecFlags::new(),
             status_up_hack: I32::ZERO,
             mock_caller: MockCaller::new(),
+            is_64_bit: false,
             version: NsisVersion::v3(),
             string_version: NsisVersion::v3(),
             file_positions: Vec::new(),
