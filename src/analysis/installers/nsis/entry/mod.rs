@@ -837,8 +837,9 @@ impl Entry {
                     count.saturating_add(start_position)
                 } else {
                     start_position
-                }
-                .clamp(0, count) as usize;
+                };
+                // A negative start position before the start of the string copies nothing
+                let start = if start < 0 { count } else { start.min(count) } as usize;
                 let remaining = (units.len() - start) as i32;
                 let length = match max_length.cmp(&0) {
                     Ordering::Equal => remaining,
