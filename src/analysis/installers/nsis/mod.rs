@@ -124,6 +124,7 @@ impl Nsis {
             &mut read_file,
             first_header.is_nsisbi(),
         )?;
+        state.is_64_bit = architecture.is_64_bit();
         state.mock_caller.configure(
             architecture,
             state.str_block.starts_with(b"\0\0"),
