@@ -14,7 +14,9 @@ use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use winget_types::Sha256String;
 
-use super::{Download, DownloadedFile, Downloads, PreDownload, file};
+use super::{
+    Download, DownloadedFile, Downloads, PreDownload, file, pre_download::is_empty_response,
+};
 use crate::{analysis::installers::msix_family::app_installer::AppInstaller, manifests::Url};
 
 pub struct Downloader {
@@ -177,6 +179,10 @@ impl Downloader {
                     err.url().unwrap().as_str(),
                     err.status().unwrap()
                 );
+            }
+
+            if is_empty_response(&res) {
+                bail!("{} returned an empty response", res.url().as_str());
             }
 
             // Check that we're downloading an application

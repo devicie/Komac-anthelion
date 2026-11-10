@@ -36,10 +36,14 @@ impl PreDownload {
         self.0
     }
 
+    /// Returns `true` if the response is successful and isn't empty.
+    ///
+    /// Some servers, such as Edraw's CDN, respond with an empty `200 OK` instead of an error
+    /// status.
     fn is_successful(response: &reqwest::Result<Response>) -> bool {
         response
             .as_ref()
-            .is_ok_and(|response| response.status().is_success())
+            .is_ok_and(|response| response.status().is_success() && !is_empty_response(response))
     }
 
     /// The user agent winget-cli itself sends, used when a server rejects the
@@ -206,6 +210,11 @@ impl PreDownload {
 
         Ok(())
     }
+}
+
+/// Returns `true` if the response declares that its body is empty.
+pub fn is_empty_response(response: &Response) -> bool {
+    response.content_length() == Some(0)
 }
 
 impl<T> From<T> for PreDownload
