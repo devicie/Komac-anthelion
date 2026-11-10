@@ -17,6 +17,7 @@ use std::{
     mem,
 };
 
+use camino::Utf8Path;
 use sevenz_rust2::{ArchiveReader, Password};
 use thiserror::Error;
 use tracing::debug;
@@ -26,7 +27,7 @@ use super::{
     font::FontAnalysis,
     pe::{PE, resource::SectionReader},
 };
-use crate::analysis::{Analyzer, Installers};
+use crate::analysis::{Analyzer, Installers, extensions::FileExtension};
 
 /// The config that precedes the 7z archive in the overlay is delimited by these lines.
 const CONFIG_START: &[u8] = b";!@Install@!UTF-8!";
@@ -164,6 +165,12 @@ fn program_path(command: &str) -> String {
     program
 }
 
+/// Returns `true` if the program has the extension of an installer that can be analysed.
+fn is_installer_program(program: &str) -> bool {
+    FileExtension::from_path(Utf8Path::new(program))
+        .is_ok_and(FileExtension::is_valid_nested_installer)
+}
+
 pub struct SevenZipSfx {
     installers: Vec<Installer>,
 }
@@ -175,6 +182,13 @@ impl SevenZipSfx {
 
         let program = config.program();
         debug!(program);
+
+        // Only installers can be analysed, so other programs, such as a batch script, leave the
+        // SFX to be analysed as a generic executable
+        if !is_installer_program(&program) {
+            debug!("{program} isn't an installer");
+            return Err(SevenZipSfxError::NotSevenZipSfxFile);
+        }
 
         let mut archive = ArchiveReader::new(
             SectionReader::from_offset(&mut reader, config.archive_offset)?,
@@ -220,7 +234,7 @@ impl Installers for SevenZipSfx {
 mod tests {
     use rstest::rstest;
 
-    use super::{parse_pair, program_path};
+    use super::{is_installer_program, parse_pair, program_path};
 
     #[rstest]
     #[case(r#"RunProgram="setup.exe""#, "RunProgram", "setup.exe")]
@@ -249,5 +263,17 @@ mod tests {
     #[case(r".\bin\install.exe -q", "bin/install.exe")]
     fn program_path_from_command(#[case] command: &str, #[case] expected: &str) {
         assert_eq!(program_path(command), expected);
+    }
+
+    #[rstest]
+    #[case("setup.exe", true)]
+    #[case("bin/Setup.EXE", true)]
+    #[case("product.msi", true)]
+    #[case("setup-git-sdk.bat", false)]
+    #[case("install.cmd", false)]
+    #[case("payload.zip", false)]
+    #[case("setup", false)]
+    fn recognises_installer_programs(#[case] program: &str, #[case] expected: bool) {
+        assert_eq!(is_installer_program(program), expected);
     }
 }
