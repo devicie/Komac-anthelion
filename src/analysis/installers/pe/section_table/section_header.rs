@@ -34,6 +34,18 @@ impl SectionHeader {
         self.virtual_size.get()
     }
 
+    /// Returns the size of the section when loaded into memory.
+    ///
+    /// Some old linkers, such as Watcom's, leave the virtual size as zero, in which case the
+    /// Windows loader uses the size of the raw data instead.
+    #[inline]
+    pub const fn mapped_size(&self) -> u32 {
+        match self.virtual_size() {
+            0 => self.size_of_raw_data(),
+            virtual_size => virtual_size,
+        }
+    }
+
     #[inline]
     pub const fn virtual_address(&self) -> u32 {
         self.virtual_address.get()
