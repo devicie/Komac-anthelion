@@ -21,13 +21,16 @@ use camino::Utf8Path;
 use sevenz_rust2::{ArchiveReader, Password};
 use thiserror::Error;
 use tracing::debug;
-use winget_types::installer::Installer;
+use winget_types::installer::{Installer, InstallerType, Switches};
 
 use super::{
     font::FontAnalysis,
     pe::{PE, resource::SectionReader},
 };
-use crate::analysis::{Analyzer, Installers, extensions::FileExtension};
+use crate::{
+    analysis::{Analyzer, Installers, extensions::FileExtension},
+    traits::IntoWingetArchitecture,
+};
 
 /// The config that precedes the 7z archive in the overlay is delimited by these lines.
 const CONFIG_START: &[u8] = b";!@Install@!UTF-8!";
@@ -37,6 +40,21 @@ const MAX_CONFIG_SIZE: u64 = 1 << 16;
 
 /// The program that is run if the config doesn't specify one.
 const DEFAULT_PROGRAM: &str = "setup.exe";
+
+/// Config keys that only the modified SFX modules by Oleg Scherbakov understand. These modules
+/// handle `-y` and `-o` themselves rather than passing them through to the program.
+///
+/// <https://github.com/chrislake/7zsfxmm/wiki/Parameters>
+const MODIFIED_SFX_KEYS: &[&str] = &[
+    "ExtractDialogText",
+    "ExtractPathText",
+    "ExtractTitle",
+    "GUIFlags",
+    "GUIMode",
+    "InstallPath",
+    "MiscFlags",
+    "OverwriteMode",
+];
 
 #[derive(Error, Debug)]
 pub enum SevenZipSfxError {
@@ -110,6 +128,14 @@ impl SfxConfig {
             .map(|(_, value)| value.as_str())
     }
 
+    /// Returns `true` if the config is for one of the modified SFX modules, which accept their own
+    /// switches.
+    fn is_modified_sfx(&self) -> bool {
+        self.pairs
+            .iter()
+            .any(|(key, _)| MODIFIED_SFX_KEYS.contains(&key.as_str()))
+    }
+
     /// Returns the path of the program in the archive that's run after extracting it.
     fn program(&self) -> String {
         let command = self
@@ -171,6 +197,16 @@ fn is_installer_program(program: &str) -> bool {
         .is_ok_and(FileExtension::is_valid_nested_installer)
 }
 
+/// The switches of the modified SFX modules: `-y` skips the prompts and `-o` sets the extraction
+/// path.
+fn modified_sfx_switches() -> Switches {
+    Switches::builder()
+        .silent("-y".parse().unwrap())
+        .silent_with_progress("-y".parse().unwrap())
+        .install_location(r#"-o"<INSTALLPATH>""#.parse().unwrap())
+        .build()
+}
+
 pub struct SevenZipSfx {
     installers: Vec<Installer>,
 }
@@ -187,6 +223,17 @@ impl SevenZipSfx {
         // SFX to be analysed as a generic executable
         if !is_installer_program(&program) {
             debug!("{program} isn't an installer");
+            // The modified SFX modules have their own switches, which are all that's known
+            if config.is_modified_sfx() {
+                return Ok(Self {
+                    installers: vec![Installer {
+                        architecture: pe.winget_architecture(),
+                        r#type: Some(InstallerType::Exe),
+                        switches: modified_sfx_switches(),
+                        ..Installer::default()
+                    }],
+                });
+            }
             return Err(SevenZipSfxError::NotSevenZipSfxFile);
         }
 
@@ -234,7 +281,7 @@ impl Installers for SevenZipSfx {
 mod tests {
     use rstest::rstest;
 
-    use super::{is_installer_program, parse_pair, program_path};
+    use super::{SfxConfig, is_installer_program, parse_pair, program_path};
 
     #[rstest]
     #[case(r#"RunProgram="setup.exe""#, "RunProgram", "setup.exe")]
@@ -275,5 +322,28 @@ mod tests {
     #[case("setup", false)]
     fn recognises_installer_programs(#[case] program: &str, #[case] expected: bool) {
         assert_eq!(is_installer_program(program), expected);
+    }
+
+    fn config(pairs: &[(&str, &str)]) -> SfxConfig {
+        SfxConfig {
+            pairs: pairs
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            archive_offset: 0,
+        }
+    }
+
+    #[test]
+    fn detects_modified_sfx() {
+        assert!(
+            config(&[
+                ("Title", "Git for Windows 64-bit SDK"),
+                ("InstallPath", r"C:\\git-sdk-64"),
+                ("ExecuteFile", "setup-git-sdk.bat"),
+            ])
+            .is_modified_sfx()
+        );
+        assert!(!config(&[("Title", "Firefox"), ("RunProgram", "setup.exe")]).is_modified_sfx());
     }
 }
