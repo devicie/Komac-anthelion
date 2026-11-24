@@ -184,14 +184,15 @@ impl Installers for QtIfw {
             // is independent of the target directory
             install_modes: InstallModes::all(),
             // https://doc.qt.io/qtinstallerframework/ifw-cli.html
+            // Both modes run headless, and only one of the message query options can be passed
             switches: Switches::builder()
                 .silent(
-                    "install --accept-licenses --accept-messages --confirm-command --default-answer"
+                    "install --accept-licenses --accept-messages --confirm-command"
                         .parse()
                         .unwrap(),
                 )
                 .silent_with_progress(
-                    "install --accept-licenses --accept-messages --confirm-command --default-answer"
+                    "install --accept-licenses --accept-messages --confirm-command"
                         .parse()
                         .unwrap(),
                 )
