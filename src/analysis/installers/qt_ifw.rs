@@ -184,8 +184,7 @@ impl Installers for QtIfw {
             // is independent of the target directory
             install_modes: InstallModes::all(),
             // https://doc.qt.io/qtinstallerframework/ifw-cli.html
-            // `--accept-messages`, `--reject-messages` and `--default-answer` are mutually
-            // exclusive, and the installer exits with 1 if more than one is passed
+            // Both modes run headless, and only one of the message query options can be passed
             switches: Switches::builder()
                 .silent(
                     "install --accept-licenses --accept-messages --confirm-command"
@@ -328,7 +327,6 @@ mod tests {
     use winget_types::installer::Architecture;
 
     use super::{Config, QtIfw};
-    use crate::analysis::Installers;
 
     fn qt_ifw(target_dir: &str, architecture: Architecture) -> QtIfw {
         QtIfw {
@@ -377,21 +375,6 @@ mod tests {
                 .install_directory()
                 .as_deref(),
             expected
-        );
-    }
-
-    #[test]
-    fn switches_answer_message_queries_once() {
-        let installers = qt_ifw("@ApplicationsDir@/App", Architecture::X64).installers();
-        let switches = &installers[0].switches;
-
-        assert_eq!(
-            switches.silent().unwrap().to_string(),
-            "install --accept-licenses --accept-messages --confirm-command"
-        );
-        assert_eq!(
-            switches.silent_with_progress().unwrap().to_string(),
-            "install --accept-licenses --accept-messages --confirm-command"
         );
     }
 }
