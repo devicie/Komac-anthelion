@@ -16,6 +16,7 @@ use super::{
     super::{
         GitHubError,
         client::GitHub,
+        github_ref,
         local::{get_versions, local_manifests_enabled},
         upstream,
         utils::PackagePath,
@@ -86,7 +87,8 @@ impl GitHub {
         const SEPARATOR: char = '/';
 
         let endpoint = format!(
-            "{REST_API_URL}/repos/{owner}/{repo}/git/trees/HEAD:{path}?recursive={recursive}",
+            "{REST_API_URL}/repos/{owner}/{repo}/git/trees/{reference}:{path}?recursive={recursive}",
+            reference = github_ref(),
             recursive = true
         );
 
