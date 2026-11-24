@@ -1,7 +1,6 @@
 mod file;
 mod return_codes;
 mod setup_ini;
-mod setup_iss;
 mod setup_xml;
 
 use std::{
@@ -28,9 +27,7 @@ use crate::{
     analysis::{
         Installers, SiblingFiles,
         installers::{
-            installshield::{
-                file::File, setup_ini::SetupIni, setup_iss::SetupIss, setup_xml::SetupXml,
-            },
+            installshield::{file::File, setup_ini::SetupIni, setup_xml::SetupXml},
             pe::{PE, VSVersionInfo},
             utils::{RELATIVE_PROGRAM_FILES_64, install_directory_scope},
         },
@@ -55,8 +52,11 @@ pub enum InstallShieldError {
 pub struct InstallShield {
     pub architecture: Architecture,
     pub setup_ini: Option<SetupIni>,
-    pub setup_iss: Option<SetupIss>,
+    pub has_setup_iss: bool,
     pub setup_xml: Option<SetupXml>,
+    pub launcher_product_name: Option<String>,
+    pub launcher_product_version: Option<String>,
+    pub launcher_company_name: Option<String>,
 }
 
 impl InstallShield {
@@ -85,27 +85,38 @@ impl InstallShield {
         }
 
         // This reads from the resource section, so it has to happen before seeking to the overlay
-        let encoding =
-            pe.vs_version_info(&mut reader)
-                .ok()
-                .and_then(|bytes| {
-                    VSVersionInfo::read_from(&bytes).ok().map(|version_info| {
-                        let string_table = version_info.string_table();
-                        if string_table
-                            .get("ISInternalDescription")
-                            .is_some_and(|description| description.starts_with("InstallScript"))
-                        {
-                            Some(InstallScriptEncoding::Unicode)
-                        } else if string_table.get("ProductName").is_some_and(|name| {
-                            matches!(*name, "InstallShield (R)" | "InstallShield")
-                        }) {
-                            Some(InstallScriptEncoding::Ascii)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .flatten();
+        let version_info_bytes = pe.vs_version_info(&mut reader).ok();
+        let version_info = version_info_bytes
+            .as_deref()
+            .and_then(|bytes| VSVersionInfo::read_from(bytes).ok());
+        let string_table = version_info
+            .as_ref()
+            .map(VSVersionInfo::string_table)
+            .unwrap_or_default();
+        let encoding = if string_table
+            .get("ISInternalDescription")
+            .is_some_and(|description| description.starts_with("InstallScript"))
+        {
+            Some(InstallScriptEncoding::Unicode)
+        } else if string_table
+            .get("ProductName")
+            .is_some_and(|name| matches!(*name, "InstallShield (R)" | "InstallShield"))
+        {
+            Some(InstallScriptEncoding::Ascii)
+        } else {
+            None
+        };
+
+        // An InstallScript setup launcher's version info is that of the product it installs, whereas
+        // a setup.iss only holds whatever was recorded when it was made, so it's never read
+        let launcher_string = |key| {
+            matches!(encoding, Some(InstallScriptEncoding::Unicode))
+                .then(|| string_table.get(key).map(|value| (*value).to_owned()))
+                .flatten()
+        };
+        let launcher_product_name = launcher_string("ProductName");
+        let launcher_product_version = launcher_string("ProductVersion");
+        let launcher_company_name = launcher_string("CompanyName");
 
         // The version info alone identifies a setup launcher, which needn't embed any files: one
         // whose overlay is empty or nothing but its Authenticode signature reads setup.ini and
@@ -166,23 +177,26 @@ impl InstallShield {
         let setup_ini = find_and_parse(&files, &mut reader, "setup.ini", parse_setup_ini)
             .or_else(|| parse_sibling(siblings, "setup.ini", parse_setup_ini));
 
-        let parse_setup_iss = |content: &str| serini::from_str::<SetupIss>(content).ok();
-        let setup_iss = find_and_parse(&files, &mut reader, "setup.iss", parse_setup_iss)
-            .or_else(|| parse_sibling(siblings, "setup.iss", parse_setup_iss));
+        let has_setup_iss = find_and_parse(&files, &mut reader, "setup.iss", |_| Some(()))
+            .or_else(|| parse_sibling(siblings, "setup.iss", |_| Some(())))
+            .is_some();
 
         let setup_xml = find_and_parse(&files, &mut reader, "Setup.xml", |content| {
             quick_xml::de::from_str::<SetupXml>(content).ok()
         });
 
-        if setup_ini.is_none() && setup_iss.is_none() && setup_xml.is_none() && !is_setup_launcher {
+        if setup_ini.is_none() && !has_setup_iss && setup_xml.is_none() && !is_setup_launcher {
             return Err(InstallShieldError::NotInstallShieldFile);
         }
 
         Ok(Self {
             architecture: Architecture::from_machine(pe.machine()),
             setup_ini,
-            setup_iss,
+            has_setup_iss,
             setup_xml,
+            launcher_product_name,
+            launcher_product_version,
+            launcher_company_name,
         })
     }
 }
@@ -232,18 +246,17 @@ impl Installers for InstallShield {
     fn installers(&self) -> Vec<Installer> {
         let startup = self.setup_ini.as_ref().map(|ini| &ini.startup);
         let xml = self.setup_xml.as_ref();
-        let iss = self.setup_iss.as_ref();
         let script_driven = startup.and_then(|s| s.script_driven.as_deref());
         let msi_based = matches!(script_driven, Some("0" | "2"));
 
-        if self.setup_ini.is_none() && iss.is_none() && xml.is_none() {
+        if self.setup_ini.is_none() && !self.has_setup_iss && xml.is_none() {
             warn!(
                 "InstallShield setup launcher without its setup.ini - its product code and \
                  installer switches may need checking"
             );
         }
 
-        if script_driven == Some("4") && iss.is_none() {
+        if script_driven == Some("4") && !self.has_setup_iss {
             warn!(
                 "InstallScriptUnicode installer without embedded setup.iss - \
                  a separate response file may be required for silent installation: \
@@ -253,7 +266,7 @@ impl Installers for InstallShield {
 
         let publisher = startup
             .and_then(|s| s.company_name.as_deref())
-            .or_else(|| iss.map(|iss| iss.application.company.as_str()))
+            .or(self.launcher_company_name.as_deref())
             .or_else(|| {
                 xml.and_then(|xml| {
                     xml.languages
@@ -289,7 +302,7 @@ impl Installers for InstallShield {
 
         let version = startup
             .and_then(|s| s.product_version.as_deref())
-            .or_else(|| iss.map(|iss| iss.application.version.as_str()))
+            .or(self.launcher_product_version.as_deref())
             .or_else(|| xml.map(|xml| xml.arp_info.version.as_str()));
 
         let locale = self
@@ -304,7 +317,7 @@ impl Installers for InstallShield {
 
         let display_name = startup
             .and_then(|s| s.product.clone())
-            .or_else(|| iss.map(|iss| iss.application.name.clone()))
+            .or_else(|| self.launcher_product_name.clone())
             .or_else(|| xml.map(|xml| xml.arp_info.display_name.clone()))
             .or_else(|| xml.and_then(|xml| xml.get_property("ProductName")));
 
@@ -563,6 +576,7 @@ fn read_utf16le_strz<R: Read>(reader: &mut R) -> Result<String, std::io::Error> 
 mod tests {
     use std::collections::HashMap;
 
+    use indoc::indoc;
     use rstest::rstest;
     use winget_types::installer::Architecture;
 
@@ -625,8 +639,11 @@ mod tests {
         let installshield = InstallShield {
             architecture: Architecture::X86,
             setup_ini,
-            setup_iss: None,
+            has_setup_iss: false,
             setup_xml,
+            launcher_product_name: None,
+            launcher_product_version: None,
+            launcher_company_name: None,
         };
 
         let installers = installshield.installers();
@@ -657,8 +674,11 @@ mod tests {
         let installshield = InstallShield {
             architecture: Architecture::X86,
             setup_ini: None,
-            setup_iss: None,
+            has_setup_iss: false,
             setup_xml: None,
+            launcher_product_name: None,
+            launcher_product_version: None,
+            launcher_company_name: None,
         };
 
         let installers = installshield.installers();
@@ -670,5 +690,45 @@ mod tests {
             "/clone_wait"
         );
         assert!(installer.product_code.is_none());
+    }
+
+    #[test]
+    fn installscript_arp_entry_ignores_recorded_response_file() {
+        // From Prolific PL23XX USB-to-Serial 4.10.0.0, whose setup.iss was recorded for an older
+        // product
+        let setup_ini = SetupIni::from_str(indoc! {"
+            [Startup]
+            Product=PL23XX USB-to-Serial
+            ProductGUID=618D450A-B26A-4CB2-ABCA-F59C209B312E
+            CompanyName=Prolific
+            ScriptDriven=4
+        "})
+        .unwrap();
+        let installshield = InstallShield {
+            architecture: Architecture::X86,
+            setup_ini: Some(setup_ini),
+            has_setup_iss: true,
+            setup_xml: None,
+            launcher_product_name: Some("PL23XX USB-to-Serial".to_owned()),
+            launcher_product_version: Some("4.10.0.0".to_owned()),
+            launcher_company_name: Some("Prolific".to_owned()),
+        };
+
+        let installers = installshield.installers();
+        let entry = installers[0]
+            .apps_and_features_entries
+            .iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(entry.display_name(), Some("PL23XX USB-to-Serial"));
+        assert_eq!(
+            entry.display_version().map(ToString::to_string).as_deref(),
+            Some("4.10.0.0")
+        );
+        assert_eq!(
+            entry.product_code(),
+            Some("{618D450A-B26A-4CB2-ABCA-F59C209B312E}")
+        );
     }
 }
