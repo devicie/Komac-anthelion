@@ -86,12 +86,15 @@ impl GitHub {
     ) -> Result<Option<BTreeSet<PackageVersion>>, GitHubError> {
         const SEPARATOR: char = '/';
 
+        let endpoint = format!(
+            "{REST_API_URL}/repos/{owner}/{repo}/git/trees/{reference}:{path}?recursive={recursive}",
+            reference = github_ref(),
+            recursive = true
+        );
+
         let response = self
             .0
-            .get(format!(
-                "{REST_API_URL}/repos/{owner}/{repo}/git/trees/{}:{path}?recursive=true",
-                github_ref()
-            ))
+            .get(&endpoint)
             .header(ACCEPT, GITHUB_JSON_MIME)
             .header(X_GITHUB_API_VERSION, REST_API_VERSION)
             .send()
