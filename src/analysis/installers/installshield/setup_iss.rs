@@ -9,7 +9,5 @@ pub struct SetupIss {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct Application {
-    pub name: String,
-    pub version: String,
     pub company: String,
 }
