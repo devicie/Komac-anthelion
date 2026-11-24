@@ -16,6 +16,7 @@ use super::{
     super::{
         GitHubError,
         client::GitHub,
+        github_ref,
         local::{get_versions, local_manifests_enabled},
         upstream,
         utils::PackagePath,
@@ -85,14 +86,9 @@ impl GitHub {
     ) -> Result<Option<BTreeSet<PackageVersion>>, GitHubError> {
         const SEPARATOR: char = '/';
 
-        let endpoint = format!(
-            "{REST_API_URL}/repos/{owner}/{repo}/git/trees/HEAD:{path}?recursive={recursive}",
-            recursive = true
-        );
-
         let response = self
             .0
-            .get(&endpoint)
+            .get(tree_endpoint(owner, repo, github_ref(), &path))
             .header(ACCEPT, GITHUB_JSON_MIME)
             .header(X_GITHUB_API_VERSION, REST_API_VERSION)
             .send()
@@ -131,6 +127,12 @@ impl GitHub {
 
         Ok((!versions.is_empty()).then_some(versions))
     }
+}
+
+/// The Git tree endpoint for `path` at `reference`. The reference comes from `KOMAC_GITHUB_REF`
+/// (`HEAD` by default), so versions are read from the same ref as the manifests themselves.
+fn tree_endpoint(owner: &str, repo: &str, reference: &str, path: &PackagePath) -> String {
+    format!("{REST_API_URL}/repos/{owner}/{repo}/git/trees/{reference}:{path}?recursive=true")
 }
 
 #[cfg(test)]
@@ -187,6 +189,17 @@ mod tests {
             .await;
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn tree_endpoint_reads_the_configured_ref() {
+        let path = PackagePath::new(&"Pulsar-Edit.Pulsar".parse().unwrap(), None, None, false);
+        assert_eq!(
+            tree_endpoint("devicie", "winget-pkgs-private", "0123abc", &path),
+            format!(
+                "{REST_API_URL}/repos/devicie/winget-pkgs-private/git/trees/0123abc:manifests/p/Pulsar-Edit/Pulsar?recursive=true"
+            )
+        );
     }
 
     #[tokio::test]
